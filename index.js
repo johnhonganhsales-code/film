@@ -25,7 +25,6 @@ async function fetchWithTimeout(url, options = {}, timeoutMs = 15000) {
   }
 }
 
-// Hàm scrape m3u8 từ trang phim — dùng chung cho stream handler và redirect
 async function fetchFreshM3u8(slug) {
   const url = `${BASE_URL}/${slug}`
   console.log('[FETCH FRESH]', url)
@@ -101,43 +100,15 @@ builder.defineMetaHandler(async ({ type, id }) => {
 
 builder.defineStreamHandler(async ({ id }) => {
   const slug = id.replace('custom:', '').split(':')[0]
-  try {
-    const masterUrl = await fetchFreshM3u8(slug)
-    
-    // Fetch master playlist để lấy link 1080p
-    const mRes = await fetchWithTimeout(masterUrl, { headers: HEADERS }, 15000)
-    const mText = await mRes.text()
-    const baseUrl = masterUrl.substring(0, masterUrl.lastIndexOf('/') + 1)
-    const lines = mText.split('\n').map(l => l.trim()).filter(Boolean)
-
-    const streams = []
-    for (let i = 0; i < lines.length; i++) {
-      if (lines[i].startsWith('#EXT-X-STREAM-INF')) {
-        const resMatch = lines[i].match(/RESOLUTION=\d+x(\d+)/)
-        const label = resMatch ? resMatch[1] + 'p' : 'HD'
-        const subLine = lines[i + 1]
-        if (subLine && !subLine.startsWith('#')) {
-          const subUrl = subLine.startsWith('http') ? subLine : baseUrl + subLine
-          // ⚠️ Trả thẳng URL CDN, không qua proxy
-          streams.push({ url: subUrl, name: label, title: label })
-        }
-      }
-    }
-
-    if (!streams.length) {
-      streams.push({ url: masterUrl, name: 'HD', title: 'HD' })
-    }
-
-    return { streams }
-  } catch (e) {
-    console.error('[STREAM ERROR]', e.message)
-    return { streams: [] }
+  console.log('[STREAM]', slug)
+  const redirectUrl = `${RENDER_URL}/stream-redirect?slug=${encodeURIComponent(slug)}`
+  return {
+    streams: [{ url: redirectUrl, name: 'HD', title: 'HD' }]
   }
 })
 
 const app = express()
 
-// Keep-alive cho Render free tier
 app.get('/ping', (req, res) => {
   res.set('Cache-Control', 'no-cache')
   res.send('ok')
@@ -151,14 +122,12 @@ function keepAlive() {
 setTimeout(keepAlive, 5000)
 setInterval(keepAlive, 13 * 60 * 1000)
 
-// ✅ Endpoint mới: scrape link m3u8 tươi mỗi lần gọi rồi redirect sang proxy
 app.get('/stream-redirect', async (req, res) => {
   const slug = req.query.slug
   if (!slug) return res.status(400).send('No slug')
   try {
     const masterUrl = await fetchFreshM3u8(slug)
 
-    // Thử parse master playlist để lấy sub-stream chất lượng cao nhất
     const mRes = await fetchWithTimeout(masterUrl, { headers: HEADERS }, 15000)
     const mText = await mRes.text()
     const baseUrl = masterUrl.substring(0, masterUrl.lastIndexOf('/') + 1)
@@ -188,7 +157,7 @@ app.get('/stream-redirect', async (req, res) => {
   }
 })
 
-// ✅ Proxy AES-128 key
+// Proxy AES-128 key
 app.get('/key', async (req, res) => {
   const target = req.query.url
   if (!target) return res.status(400).send('No URL')
@@ -204,7 +173,7 @@ app.get('/key', async (req, res) => {
   }
 })
 
-// ✅ M3U8 proxy — rewrite EXT-X-KEY, .m3u8, và .ts
+// M3U8 proxy — rewrite key, KHÔNG proxy .ts (để Stremio tự fetch thẳng CDN)
 app.get('/m3u8', async (req, res) => {
   const target = req.query.url
   if (!target) return res.status(400).send('No URL')
@@ -228,6 +197,7 @@ app.get('/m3u8', async (req, res) => {
       const l = line.trim()
       if (!l) return line
 
+      // Proxy key để tránh CORS
       if (l.startsWith('#EXT-X-KEY')) {
         return l.replace(/URI="([^"]+)"/, (match, keyUri) => {
           const absKey = keyUri.startsWith('http') ? keyUri : base + keyUri
@@ -237,49 +207,21 @@ app.get('/m3u8', async (req, res) => {
 
       if (l.startsWith('#')) return line
 
+      // Sub-playlist .m3u8 vẫn proxy
       if (l.endsWith('.m3u8')) {
         const abs = l.startsWith('http') ? l : base + l
         return `${RENDER_URL}/m3u8?url=${encodeURIComponent(abs)}`
       }
 
+      // ✅ .ts segment: trả URL tuyệt đối thẳng đến CDN, KHÔNG proxy qua server
       const absTs = l.startsWith('http') ? l : base + l
-      return `${RENDER_URL}/ts?url=${encodeURIComponent(absTs)}`
+      return absTs
     }).join('\n')
 
     return res.send(rewritten)
   } catch (e) {
     console.error('[M3U8 ERROR]', e.message)
     res.status(500).send('error')
-  }
-})
-
-// ✅ TS segment proxy
-app.get('/ts', async (req, res) => {
-  const target = req.query.url
-  if (!target) return res.status(400).send('No URL')
-  try {
-    const r = await fetchWithTimeout(target, {
-      headers: {
-        ...HEADERS,
-        'Range': req.headers['range'] || '',
-      }
-    }, 20000)
-
-    res.status(r.status)
-    res.set('Content-Type', r.headers.get('content-type') || 'video/mp2t')
-    res.set('Access-Control-Allow-Origin', '*')
-    res.set('Access-Control-Allow-Headers', '*')
-
-    const cl = r.headers.get('content-length')
-    if (cl) res.set('Content-Length', cl)
-
-    const cr = r.headers.get('content-range')
-    if (cr) res.set('Content-Range', cr)
-
-    r.body.pipe(res)
-  } catch (e) {
-    console.error('[TS ERROR]', e.message)
-    if (!res.headersSent) res.status(500).send('error')
   }
 })
 
