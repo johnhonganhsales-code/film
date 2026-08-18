@@ -1,25 +1,108 @@
 const { addonBuilder, getRouter } = require('stremio-addon-sdk')
-const fetch = require('node-fetch')
 const express = require('express')
-const cheerio = require('cheerio')
+const { TelegramClient } = require('telegram')
+const { StringSession } = require('telegram/sessions')
+const { Api } = require('telegram/tl')
 
-const ADDON_NAME = 'MyFilms'
-const PORT = process.env.PORT || 7000
-const RENDER_URL = 'https://film-rbkk.onrender.com'
+// ─── CẤU HÌNH ────────────────────────────────────────────────────────────────
+const ADDON_NAME  = 'MyFilms'
+const PORT        = process.env.PORT        || 7000
+const RENDER_URL  = process.env.RENDER_URL  || 'https://film-rbkk.onrender.com'
 
+// Lấy tại https://my.telegram.org → App configuration
+const TG_API_ID   = parseInt(process.env.TG_API_ID   || '0')
+const TG_API_HASH = process.env.TG_API_HASH           || ''
+// Session string — chạy auth.js một lần để sinh ra chuỗi này
+const TG_SESSION  = process.env.TG_SESSION            || ''
+
+// Danh sách phim
+// chatId: username (@channel) hoặc số âm (-100xxx) của group/channel
+// messageId: ID của message chứa video/document
 const VIDEOS = [
   {
     id: 'phim-1',
     name: 'Phim 1',
-    fileId: '1S91xehn-0zqRxW99FZ1b8be6JEo1TQ2L',
+    chatId: '-1004309743217',
+    messageId: 3,
+    poster: '',
+    description: ''
+  },
+  {
+    id: 'phim-2',
+    name: 'Phim 2',
+    chatId: '-1001234567890',
+    messageId: 456,
     poster: '',
     description: ''
   },
 ]
+// ─────────────────────────────────────────────────────────────────────────────
+
+let tgClient = null
+
+async function getTgClient() {
+  if (tgClient && tgClient.connected) return tgClient
+
+  console.log('[TG] Đang kết nối MTProto...')
+  const session = new StringSession(TG_SESSION)
+  tgClient = new TelegramClient(session, TG_API_ID, TG_API_HASH, {
+    connectionRetries: 5,
+    autoReconnect: true,
+  })
+  await tgClient.connect()
+  console.log('[TG] Đã kết nối MTProto ✅')
+  return tgClient
+}
+
+// Cache: cacheKey -> { inputLocation, dcId, size, accessHash }
+const locationCache = new Map()
+
+async function getFileLocation(chatId, messageId) {
+  const cacheKey = `${chatId}:${messageId}`
+  if (locationCache.has(cacheKey)) return locationCache.get(cacheKey)
+
+  const client = await getTgClient()
+
+  // Resolve entity (channel/group/user)
+  const entity = await client.getEntity(chatId)
+
+  // Lấy message
+  const messages = await client.getMessages(entity, { ids: [messageId] })
+  if (!messages || messages.length === 0) throw new Error('Không tìm thấy message')
+
+  const msg = messages[0]
+  const media = msg.media
+
+  if (!media) throw new Error('Message không có media')
+
+  let inputLocation, size, mimeType
+
+  // Xử lý video (MessageMediaDocument với mime video/*)
+  if (media.document) {
+    const doc = media.document
+    mimeType = doc.mimeType
+    size = Number(doc.size)
+    inputLocation = new Api.InputDocumentFileLocation({
+      id: doc.id,
+      accessHash: doc.accessHash,
+      fileReference: doc.fileReference,
+      thumbSize: ''
+    })
+    console.log(`[TG] Document: ${mimeType} | ${(size / 1024 / 1024).toFixed(1)} MB`)
+  } else {
+    throw new Error('Media không phải document/video: ' + media.className)
+  }
+
+  const info = { inputLocation, size, mimeType: mimeType || 'video/mp4' }
+  locationCache.set(cacheKey, info)
+  return info
+}
+
+// ─── STREMIO ADDON ────────────────────────────────────────────────────────────
 
 const builder = new addonBuilder({
-  id: 'com.myfilms.gdrive4',
-  version: '1.0.0',
+  id: 'com.myfilms.telegram',
+  version: '2.0.0',
   name: ADDON_NAME,
   resources: ['catalog', 'meta', 'stream'],
   types: ['movie'],
@@ -57,129 +140,128 @@ builder.defineStreamHandler(async ({ id }) => {
   const key = id.replace('myfilm:', '')
   const v = VIDEOS.find(x => x.id === key)
   if (!v) return { streams: [] }
+
   return {
-    streams: [{ url: `${RENDER_URL}/gdrive?id=${v.fileId}`, name: 'HD', title: v.name }]
+    streams: [{
+      url: `${RENDER_URL}/tgstream?chat=${encodeURIComponent(v.chatId)}&msg=${v.messageId}`,
+      name: 'HD',
+      title: `${v.name} [Telegram]`
+    }]
   }
 })
 
+// ─── EXPRESS + STREAM PROXY ───────────────────────────────────────────────────
+
 const app = express()
 
-app.get('/ping', (req, res) => { res.set('Cache-Control', 'no-cache'); res.send('ok') })
+app.get('/ping', (req, res) => {
+  res.set('Cache-Control', 'no-cache')
+  res.send('ok')
+})
+
+// Keep-alive
 function keepAlive() {
-  fetch(`${RENDER_URL}/ping`).then(() => console.log('[KEEP-ALIVE] ok')).catch(e => console.error('[KEEP-ALIVE]', e.message))
+  const http = require('http')
+  const url = new URL(RENDER_URL + '/ping')
+  http.get({ host: url.hostname, path: url.pathname, headers: { 'User-Agent': 'keepalive' } }, r => {
+    console.log('[KEEP-ALIVE] ok', r.statusCode)
+  }).on('error', e => console.error('[KEEP-ALIVE]', e.message))
 }
 setTimeout(keepAlive, 5000)
 setInterval(keepAlive, 13 * 60 * 1000)
 
-const UA = 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 Chrome/120 Safari/537.36'
-
-async function resolveGDriveUrl(fileId) {
-  // Bước 1: request đầu để lấy cookie
-  const url1 = `https://drive.google.com/uc?id=${fileId}&export=download`
-  const r1 = await fetch(url1, { redirect: 'manual', headers: { 'User-Agent': UA } })
-
-  let cookies = ''
-  const sc1 = r1.headers.get('set-cookie')
-  if (sc1) cookies = sc1.split(',').map(c => c.split(';')[0].trim()).join('; ')
-
-  // Bước 2: follow đến trang virus warning
-  const url2 = r1.headers.get('location') || url1
-  const r2 = await fetch(url2, {
-    redirect: 'follow',
-    headers: { 'User-Agent': UA, ...(cookies ? { Cookie: cookies } : {}) }
-  })
-
-  const sc2 = r2.headers.get('set-cookie')
-  if (sc2) {
-    const c2 = sc2.split(',').map(c => c.split(';')[0].trim()).join('; ')
-    cookies = cookies ? cookies + '; ' + c2 : c2
-  }
-
-  const ct2 = r2.headers.get('content-type') || ''
-  if (!ct2.includes('html')) return { url: url2, cookies }
-
-  const html = await r2.text()
-  const $ = cheerio.load(html)
-
-  // Parse form action và hidden inputs từ trang virus warning
-  const formAction = $('form').attr('action')
-  console.log('[GDRIVE] Form action:', formAction)
-
-  // Lấy tất cả hidden input
-  const params = new URLSearchParams()
-  $('form input[type=hidden]').each((i, el) => {
-    const name = $(el).attr('name')
-    const value = $(el).attr('value') || ''
-    if (name) {
-      params.append(name, value)
-      console.log('[GDRIVE] Input:', name, '=', value.substring(0, 30))
-    }
-  })
-
-  if (!formAction) {
-    // Thử tìm link download trực tiếp trong HTML
-    const dlLink = html.match(/href="(https:\/\/drive\.usercontent\.google\.com\/download[^"]+)"/)
-    if (dlLink) {
-      const directUrl = dlLink[1].replace(/&amp;/g, '&')
-      console.log('[GDRIVE] Found direct link:', directUrl.substring(0, 100))
-      return { url: directUrl, cookies }
-    }
-    throw new Error('Không tìm thấy form action hay direct link')
-  }
-
-  // Submit form để lấy file
-  const finalUrl = formAction.startsWith('http') ? formAction : 'https://drive.google.com' + formAction
-  const submitUrl = `${finalUrl}?${params.toString()}`
-  console.log('[GDRIVE] Submit URL:', submitUrl.substring(0, 120))
-
-  return { url: submitUrl, cookies }
-}
-
-app.get('/gdrive', async (req, res) => {
-  const fileId = req.query.id
-  if (!fileId) return res.status(400).send('No file ID')
+/**
+ * /tgstream?chat=@channel&msg=123
+ *
+ * Hỗ trợ HTTP Range (seek) bằng cách dùng gramjs iterDownload
+ * để stream thẳng từ Telegram DC về client mà không lưu disk.
+ */
+app.get('/tgstream', async (req, res) => {
+  const { chat, msg } = req.query
+  if (!chat || !msg) return res.status(400).send('Thiếu chat hoặc msg')
 
   try {
-    const { url: directUrl, cookies } = await resolveGDriveUrl(fileId)
+    const { inputLocation, size, mimeType } = await getFileLocation(chat, parseInt(msg))
+    const client = await getTgClient()
 
     const rangeHeader = req.headers['range']
-    const r = await fetch(directUrl, {
-      headers: {
-        'User-Agent': UA,
-        ...(cookies ? { Cookie: cookies } : {}),
-        ...(rangeHeader ? { Range: rangeHeader } : {})
+    let start = 0
+    let end = size - 1
+
+    if (rangeHeader) {
+      const match = rangeHeader.match(/bytes=(\d+)-(\d*)/)
+      if (match) {
+        start = parseInt(match[1])
+        end = match[2] ? parseInt(match[2]) : size - 1
       }
-    })
-
-    const ct = r.headers.get('content-type') || ''
-    console.log('[GDRIVE] Stream status:', r.status, '| CT:', ct)
-
-    if (ct.includes('html')) {
-      const snippet = await r.text()
-      console.error('[GDRIVE] Vẫn HTML:', snippet.substring(0, 300))
-      return res.status(502).send('Drive vẫn trả HTML')
     }
 
-    res.status(r.status)
-    res.set('Content-Type', ct || 'video/mp4')
-    res.set('Access-Control-Allow-Origin', '*')
-    res.set('Accept-Ranges', 'bytes')
-    const cl = r.headers.get('content-length')
-    if (cl) res.set('Content-Length', cl)
-    const cr = r.headers.get('content-range')
-    if (cr) res.set('Content-Range', cr)
+    const chunkSize = end - start + 1
 
-    r.body.pipe(res)
-    req.on('close', () => r.body.destroy())
+    res.status(rangeHeader ? 206 : 200)
+    res.set('Content-Type', mimeType)
+    res.set('Accept-Ranges', 'bytes')
+    res.set('Access-Control-Allow-Origin', '*')
+    res.set('Content-Length', String(chunkSize))
+    if (rangeHeader) {
+      res.set('Content-Range', `bytes ${start}-${end}/${size}`)
+    }
+
+    console.log(`[TGSTREAM] ${chat}:${msg} | ${(start/1024/1024).toFixed(1)}MB - ${(end/1024/1024).toFixed(1)}MB`)
+
+    // gramjs iterDownload: stream theo chunk 512KB, bắt đầu từ offset đúng
+    const PART_SIZE = 512 * 1024  // 512KB mỗi chunk (phải là bội số của 4KB)
+
+    const iter = client.iterDownload({
+      file: inputLocation,
+      offset: BigInt(start - (start % PART_SIZE)), // align về bội số PART_SIZE
+      limit: BigInt(end - start + PART_SIZE),       // tải dư một chút để cover end
+      requestSize: PART_SIZE,
+    })
+
+    let bytesSent = 0
+    let bytesToSkip = start % PART_SIZE  // phần thừa do align
+
+    for await (const chunk of iter) {
+      if (res.destroyed) break
+
+      let slice = chunk
+      if (bytesToSkip > 0) {
+        slice = chunk.slice(bytesToSkip)
+        bytesToSkip = 0
+      }
+
+      const remaining = chunkSize - bytesSent
+      if (slice.length > remaining) {
+        slice = slice.slice(0, remaining)
+      }
+
+      res.write(slice)
+      bytesSent += slice.length
+
+      if (bytesSent >= chunkSize) break
+    }
+
+    res.end()
 
   } catch (e) {
-    console.error('[GDRIVE ERROR]', e.message)
-    if (!res.headersSent) res.status(500).send('error: ' + e.message)
+    console.error('[TGSTREAM ERROR]', e.message)
+    if (!res.headersSent) res.status(500).send('Lỗi: ' + e.message)
   }
 })
 
 app.use('/', getRouter(builder.getInterface()))
 
-app.listen(PORT, '0.0.0.0', () => {
-  console.log(`✅ Addon: http://localhost:${PORT}/manifest.json`)
-})
+// Khởi động: kết nối TG trước rồi mới listen
+;(async () => {
+  try {
+    await getTgClient()
+  } catch (e) {
+    console.error('[TG] Lỗi kết nối ban đầu:', e.message)
+    console.error('     → Chạy auth.js để tạo TG_SESSION trước')
+  }
+
+  app.listen(PORT, '0.0.0.0', () => {
+    console.log(`✅ Addon: http://localhost:${PORT}/manifest.json`)
+  })
+})()
