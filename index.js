@@ -25,6 +25,25 @@ async function fetchWithTimeout(url, options = {}, timeoutMs = 15000) {
   }
 }
 
+// Hàm scrape m3u8 từ trang phim — dùng chung cho stream handler và redirect
+async function fetchFreshM3u8(slug) {
+  const url = `${BASE_URL}/${slug}`
+  console.log('[FETCH FRESH]', url)
+  const res = await fetchWithTimeout(url, { headers: HEADERS }, 20000)
+  const html = await res.text()
+  const $ = cheerio.load(html)
+  const scripts = $('script').map((i, el) => $(el).html() || '').get().join('\n')
+
+  const b64match = scripts.match(/window\.atob\(["']([A-Za-z0-9+/=]+)["']\)/)
+  if (!b64match) throw new Error('Không tìm thấy base64 stream URL')
+
+  const masterUrl = Buffer.from(b64match[1], 'base64').toString('utf8')
+  console.log('[MASTER URL]', masterUrl)
+
+  if (!masterUrl.includes('.m3u8')) throw new Error('URL không phải m3u8: ' + masterUrl)
+  return masterUrl
+}
+
 const builder = new addonBuilder({
   id: 'com.myaddon.javhd',
   version: '1.0.0',
@@ -38,25 +57,25 @@ const builder = new addonBuilder({
 
 builder.defineCatalogHandler(async ({ extra }) => {
   const page = extra.skip ? Math.floor(extra.skip / 20) + 1 : 1
-  const url  = `${BASE_URL}/video/page/${page}/`
+  const url = `${BASE_URL}/video/page/${page}/`
   try {
-    const res  = await fetchWithTimeout(url, { headers: HEADERS })
+    const res = await fetchWithTimeout(url, { headers: HEADERS })
     const html = await res.text()
-    const $    = cheerio.load(html)
+    const $ = cheerio.load(html)
     const metas = []
-    const seen  = new Set()
+    const seen = new Set()
     $('a.movie-item.m-block').each((i, el) => {
-      const href  = $(el).attr('href') || ''
+      const href = $(el).attr('href') || ''
       const title = $(el).attr('title') || ''
-      const img   = $(el).find('img').attr('src') || $(el).find('img').attr('data-src') || ''
-      const slug  = href.replace(/^\//, '').replace(/\/$/, '')
+      const img = $(el).find('img').attr('src') || $(el).find('img').attr('data-src') || ''
+      const slug = href.replace(/^\//, '').replace(/\/$/, '')
       if (!slug || !title || seen.has(slug)) return
       seen.add(slug)
       const poster = img.startsWith('http') ? img : `${BASE_URL}${img}`
       metas.push({ id: `custom:${slug}`, type: 'movie', name: title, poster })
     })
     return { metas }
-  } catch(e) {
+  } catch (e) {
     console.error('[CATALOG ERROR]', e.message)
     return { metas: [] }
   }
@@ -64,17 +83,17 @@ builder.defineCatalogHandler(async ({ extra }) => {
 
 builder.defineMetaHandler(async ({ type, id }) => {
   const slug = id.replace('custom:', '')
-  const url  = `${BASE_URL}/${slug}`
+  const url = `${BASE_URL}/${slug}`
   try {
-    const res  = await fetchWithTimeout(url, { headers: HEADERS })
+    const res = await fetchWithTimeout(url, { headers: HEADERS })
     const html = await res.text()
-    const $    = cheerio.load(html)
-    const name   = $('h1').first().text().trim()
-    const desc   = $('p.hidden').first().text().trim()
+    const $ = cheerio.load(html)
+    const name = $('h1').first().text().trim()
+    const desc = $('p.hidden').first().text().trim()
     const rawImg = $('img.public-film-item-thumb').first().attr('src') || $('img').first().attr('src') || ''
     const poster = rawImg.startsWith('http') ? rawImg : `${BASE_URL}${rawImg}`
     return { meta: { id, type, name: name || slug, description: desc, poster } }
-  } catch(e) {
+  } catch (e) {
     console.error('[META ERROR]', e.message)
     return { meta: { id, type, name: slug } }
   }
@@ -82,65 +101,21 @@ builder.defineMetaHandler(async ({ type, id }) => {
 
 builder.defineStreamHandler(async ({ id }) => {
   const slug = id.replace('custom:', '').split(':')[0]
-  const url  = `${BASE_URL}/${slug}`
-  console.log('[STREAM]', url)
-  try {
-    const res  = await fetchWithTimeout(url, { headers: HEADERS }, 20000)
-    const html = await res.text()
-    const $    = cheerio.load(html)
-    const scripts = $('script').map((i, el) => $(el).html() || '').get().join('\n')
-    const streams = []
+  console.log('[STREAM]', slug)
 
-    const b64match = scripts.match(/window\.atob\(["']([A-Za-z0-9+/=]+)["']\)/)
-    if (b64match) {
-      const masterUrl = Buffer.from(b64match[1], 'base64').toString('utf8')
-      console.log('[MASTER URL]', masterUrl)
-      if (masterUrl.includes('.m3u8')) {
-        try {
-          const mRes  = await fetchWithTimeout(masterUrl, { headers: HEADERS }, 15000)
-          const mText = await mRes.text()
-          const baseUrl = masterUrl.substring(0, masterUrl.lastIndexOf('/') + 1)
-          const lines = mText.split('\n').map(l => l.trim()).filter(Boolean)
-
-          for (let i = 0; i < lines.length; i++) {
-            if (lines[i].startsWith('#EXT-X-STREAM-INF')) {
-              const resMatch = lines[i].match(/RESOLUTION=(\d+x\d+)/)
-              const label = resMatch ? resMatch[1].split('x')[1] + 'p' : 'HD'
-              const subLine = lines[i+1]
-              if (subLine && !subLine.startsWith('#')) {
-                const subUrl = subLine.startsWith('http') ? subLine : baseUrl + subLine
-                const proxyUrl = `${RENDER_URL}/m3u8?url=${encodeURIComponent(subUrl)}`
-                streams.push({ url: proxyUrl, name: label, title: label })
-              }
-            }
-          }
-
-          if (!streams.length) {
-            const proxyUrl = `${RENDER_URL}/m3u8?url=${encodeURIComponent(masterUrl)}`
-            streams.push({ url: proxyUrl, name: 'HD', title: 'HD' })
-          }
-        } catch(e) {
-          console.error('[MASTER M3U8 ERROR]', e.message)
-          const proxyUrl = `${RENDER_URL}/m3u8?url=${encodeURIComponent(masterUrl)}`
-          streams.push({ url: proxyUrl, name: 'HD', title: 'HD' })
-        }
-      }
-    }
-
-    if (!streams.length) {
-      console.warn('[STREAM] Không tìm được stream, fallback web')
-      streams.push({ externalUrl: url, name: 'Web', title: 'Mở trình duyệt' })
-    }
-
-    return { streams }
-  } catch(e) {
-    console.error('[STREAM ERROR]', e.message)
-    return { streams: [] }
+  // Trả về URL dạng /stream-redirect?slug=... 
+  // Stremio sẽ gọi endpoint này mỗi lần play → luôn lấy link m3u8 mới
+  const redirectUrl = `${RENDER_URL}/stream-redirect?slug=${encodeURIComponent(slug)}`
+  return {
+    streams: [
+      { url: redirectUrl, name: 'HD', title: 'HD' }
+    ]
   }
 })
 
 const app = express()
 
+// Keep-alive cho Render free tier
 app.get('/ping', (req, res) => {
   res.set('Cache-Control', 'no-cache')
   res.send('ok')
@@ -154,7 +129,44 @@ function keepAlive() {
 setTimeout(keepAlive, 5000)
 setInterval(keepAlive, 13 * 60 * 1000)
 
-// ✅ Proxy AES-128 encryption key
+// ✅ Endpoint mới: scrape link m3u8 tươi mỗi lần gọi rồi redirect sang proxy
+app.get('/stream-redirect', async (req, res) => {
+  const slug = req.query.slug
+  if (!slug) return res.status(400).send('No slug')
+  try {
+    const masterUrl = await fetchFreshM3u8(slug)
+
+    // Thử parse master playlist để lấy sub-stream chất lượng cao nhất
+    const mRes = await fetchWithTimeout(masterUrl, { headers: HEADERS }, 15000)
+    const mText = await mRes.text()
+    const baseUrl = masterUrl.substring(0, masterUrl.lastIndexOf('/') + 1)
+    const lines = mText.split('\n').map(l => l.trim()).filter(Boolean)
+
+    let bestUrl = null
+    let bestHeight = 0
+
+    for (let i = 0; i < lines.length; i++) {
+      if (lines[i].startsWith('#EXT-X-STREAM-INF')) {
+        const resMatch = lines[i].match(/RESOLUTION=\d+x(\d+)/)
+        const height = resMatch ? parseInt(resMatch[1]) : 0
+        const subLine = lines[i + 1]
+        if (subLine && !subLine.startsWith('#') && height >= bestHeight) {
+          bestHeight = height
+          bestUrl = subLine.startsWith('http') ? subLine : baseUrl + subLine
+        }
+      }
+    }
+
+    const finalUrl = bestUrl || masterUrl
+    console.log('[REDIRECT TO]', finalUrl)
+    res.redirect(`${RENDER_URL}/m3u8?url=${encodeURIComponent(finalUrl)}`)
+  } catch (e) {
+    console.error('[STREAM-REDIRECT ERROR]', e.message)
+    res.status(500).send('Lỗi lấy stream: ' + e.message)
+  }
+})
+
+// ✅ Proxy AES-128 key
 app.get('/key', async (req, res) => {
   const target = req.query.url
   if (!target) return res.status(400).send('No URL')
@@ -164,7 +176,7 @@ app.get('/key', async (req, res) => {
     res.set('Access-Control-Allow-Origin', '*')
     res.set('Access-Control-Allow-Headers', '*')
     r.body.pipe(res)
-  } catch(e) {
+  } catch (e) {
     console.error('[KEY ERROR]', e.message)
     res.status(500).send('error')
   }
@@ -176,6 +188,11 @@ app.get('/m3u8', async (req, res) => {
   if (!target) return res.status(400).send('No URL')
   try {
     const r = await fetchWithTimeout(target, { headers: HEADERS }, 15000)
+
+    if (!r.ok) {
+      console.error('[M3U8 ERROR] CDN trả về', r.status, target)
+      return res.status(502).send(`CDN trả về ${r.status}`)
+    }
 
     res.set('Content-Type', 'application/vnd.apple.mpegurl')
     res.set('Access-Control-Allow-Origin', '*')
@@ -189,7 +206,6 @@ app.get('/m3u8', async (req, res) => {
       const l = line.trim()
       if (!l) return line
 
-      // Rewrite EXT-X-KEY URI để proxy key qua server
       if (l.startsWith('#EXT-X-KEY')) {
         return l.replace(/URI="([^"]+)"/, (match, keyUri) => {
           const absKey = keyUri.startsWith('http') ? keyUri : base + keyUri
@@ -209,13 +225,13 @@ app.get('/m3u8', async (req, res) => {
     }).join('\n')
 
     return res.send(rewritten)
-  } catch(e) {
+  } catch (e) {
     console.error('[M3U8 ERROR]', e.message)
     res.status(500).send('error')
   }
 })
 
-// ✅ TS segment proxy với đầy đủ headers
+// ✅ TS segment proxy
 app.get('/ts', async (req, res) => {
   const target = req.query.url
   if (!target) return res.status(400).send('No URL')
@@ -228,9 +244,7 @@ app.get('/ts', async (req, res) => {
     }, 20000)
 
     res.status(r.status)
-
-    const ct = r.headers.get('content-type') || 'video/mp2t'
-    res.set('Content-Type', ct)
+    res.set('Content-Type', r.headers.get('content-type') || 'video/mp2t')
     res.set('Access-Control-Allow-Origin', '*')
     res.set('Access-Control-Allow-Headers', '*')
 
@@ -241,7 +255,7 @@ app.get('/ts', async (req, res) => {
     if (cr) res.set('Content-Range', cr)
 
     r.body.pipe(res)
-  } catch(e) {
+  } catch (e) {
     console.error('[TS ERROR]', e.message)
     if (!res.headersSent) res.status(500).send('error')
   }
