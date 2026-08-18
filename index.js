@@ -6,13 +6,6 @@ const ADDON_NAME = 'MyFilms'
 const PORT = process.env.PORT || 7000
 const RENDER_URL = 'https://film-rbkk.onrender.com'
 
-// =============================================
-// THÊM PHIM VÀO ĐÂY
-// id: tự đặt (không dấu, không space)
-// name: tên hiển thị
-// fileId: lấy từ link Google Drive
-// poster: link ảnh bìa (tùy chọn)
-// =============================================
 const VIDEOS = [
   {
     id: 'phim-1',
@@ -21,14 +14,6 @@ const VIDEOS = [
     poster: '',
     description: ''
   },
-  // Thêm phim khác vào đây:
-  // {
-  //   id: 'phim-2',
-  //   name: 'Tên phim 2',
-  //   fileId: 'FILE_ID_TỪ_DRIVE',
-  //   poster: 'https://link-anh-bia.jpg',
-  //   description: 'Mô tả phim'
-  // },
 ]
 
 const builder = new addonBuilder({
@@ -72,7 +57,6 @@ builder.defineStreamHandler(async ({ id }) => {
   const key = id.replace('myfilm:', '')
   const v = VIDEOS.find(x => x.id === key)
   if (!v) return { streams: [] }
-
   const streamUrl = `${RENDER_URL}/gdrive?id=${v.fileId}`
   return {
     streams: [{ url: streamUrl, name: 'HD', title: v.name }]
@@ -81,7 +65,6 @@ builder.defineStreamHandler(async ({ id }) => {
 
 const app = express()
 
-// Keep-alive
 app.get('/ping', (req, res) => {
   res.set('Cache-Control', 'no-cache')
   res.send('ok')
@@ -94,58 +77,74 @@ function keepAlive() {
 setTimeout(keepAlive, 5000)
 setInterval(keepAlive, 13 * 60 * 1000)
 
-// Google Drive proxy — bypass redirect và stream thẳng
+// Hàm lấy direct URL từ Google Drive (bypass virus scan warning)
+async function getGDriveDirectUrl(fileId) {
+  const baseUrl = `https://drive.google.com/uc?export=download&id=${fileId}`
+  const headers = {
+    'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 Chrome/120 Safari/537.36'
+  }
+
+  // Bước 1: request đầu để lấy cookie và confirm token
+  const r1 = await fetch(baseUrl, { headers, redirect: 'manual' })
+
+  // Nếu redirect thẳng → file nhỏ, dùng luôn
+  const loc1 = r1.headers.get('location')
+  if (loc1) return loc1
+
+  // File lớn → Drive trả về trang HTML với confirm token
+  const html = await r1.text()
+  const cookies = r1.headers.get('set-cookie') || ''
+
+  // Lấy confirm token từ form action hoặc link
+  const confirmMatch = html.match(/confirm=([0-9A-Za-z_-]+)/)
+  const uuidMatch = html.match(/uuid=([0-9A-Za-z_-]+)/)
+
+  if (confirmMatch) {
+    const confirm = confirmMatch[1]
+    const uuid = uuidMatch ? uuidMatch[1] : ''
+    const confirmUrl = `https://drive.usercontent.google.com/download?id=${fileId}&export=download&confirm=${confirm}${uuid ? '&uuid=' + uuid : ''}`
+    console.log('[GDRIVE] Confirm URL:', confirmUrl)
+    return confirmUrl
+  }
+
+  // Thử dùng usercontent domain trực tiếp
+  return `https://drive.usercontent.google.com/download?id=${fileId}&export=download&confirm=t`
+}
+
 app.get('/gdrive', async (req, res) => {
   const fileId = req.query.id
   if (!fileId) return res.status(400).send('No file ID')
 
   try {
-    // Bước 1: lấy redirect URL thật từ Drive
-    const driveUrl = `https://drive.google.com/uc?export=download&id=${fileId}&confirm=t`
-    console.log('[GDRIVE] Fetching:', driveUrl)
+    console.log('[GDRIVE] FileID:', fileId)
+    const directUrl = await getGDriveDirectUrl(fileId)
+    console.log('[GDRIVE] Streaming from:', directUrl)
 
-    const r1 = await fetch(driveUrl, {
-      redirect: 'manual',
-      headers: {
-        'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 Chrome/120 Safari/537.36'
-      }
-    })
-
-    // Drive redirect sang URL thật
-    let finalUrl = r1.headers.get('location')
-
-    // Nếu không redirect, dùng luôn URL gốc
-    if (!finalUrl) {
-      finalUrl = driveUrl
-    }
-
-    console.log('[GDRIVE] Final URL:', finalUrl)
-
-    // Bước 2: stream file về client
     const rangeHeader = req.headers['range']
-    const r2 = await fetch(finalUrl, {
+    const streamRes = await fetch(directUrl, {
       headers: {
         'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 Chrome/120 Safari/537.36',
         ...(rangeHeader ? { 'Range': rangeHeader } : {})
       }
     })
 
-    res.status(r2.status)
-    res.set('Content-Type', r2.headers.get('content-type') || 'video/mp4')
-    res.set('Access-Control-Allow-Origin', '*')
+    console.log('[GDRIVE] Response status:', streamRes.status)
 
-    const cl = r2.headers.get('content-length')
+    res.status(streamRes.status)
+    res.set('Content-Type', streamRes.headers.get('content-type') || 'video/mp4')
+    res.set('Access-Control-Allow-Origin', '*')
+    res.set('Accept-Ranges', 'bytes')
+
+    const cl = streamRes.headers.get('content-length')
     if (cl) res.set('Content-Length', cl)
 
-    const cr = r2.headers.get('content-range')
+    const cr = streamRes.headers.get('content-range')
     if (cr) res.set('Content-Range', cr)
 
-    if (r2.status === 206) res.set('Accept-Ranges', 'bytes')
-
-    r2.body.pipe(res)
+    streamRes.body.pipe(res)
   } catch (e) {
     console.error('[GDRIVE ERROR]', e.message)
-    if (!res.headersSent) res.status(500).send('error')
+    if (!res.headersSent) res.status(500).send('error: ' + e.message)
   }
 })
 
