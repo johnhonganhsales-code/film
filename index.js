@@ -142,7 +142,7 @@ app.get('/m3u8', async (req, res) => {
       // Nếu là m3u8 con, cũng proxy
       if (l.endsWith('.m3u8')) {
         const abs = l.startsWith('http') ? l : base + l
-        return `http://localhost:${PORT}/m3u8?url=${encodeURIComponent(abs)}`
+        return `https://film-rbkk.onrender.com/m3u8?url=${encodeURIComponent(abs)}`
       }
       // Segment .ts — trả URL tuyệt đối thẳng
       return l.startsWith('http') ? l : base + l
@@ -158,5 +158,5 @@ app.get('/m3u8', async (req, res) => {
 app.use('/', getRouter(builder.getInterface()))
 
 app.listen(PORT, '0.0.0.0', () => {
-  console.log(`✅ Addon chạy tại: http://localhost:${PORT}/manifest.json`)
+  console.log(`✅ Addon chạy tại: https://film-rbkk.onrender.com/manifest.json`)
 })
