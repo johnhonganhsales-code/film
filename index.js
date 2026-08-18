@@ -1,232 +1,156 @@
 const { addonBuilder, getRouter } = require('stremio-addon-sdk')
 const fetch = require('node-fetch')
-const cheerio = require('cheerio')
 const express = require('express')
 
-const BASE_URL = 'https://javhdz.city'
-const ADDON_NAME = 'JAVHD'
+const ADDON_NAME = 'MyFilms'
 const PORT = process.env.PORT || 7000
 const RENDER_URL = 'https://film-rbkk.onrender.com'
 
-const HEADERS = {
-  'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 Chrome/120 Safari/537.36',
-  'Referer': BASE_URL + '/',
-  'Origin': BASE_URL
-}
-
-async function fetchWithTimeout(url, options = {}, timeoutMs = 15000) {
-  const controller = new AbortController()
-  const timer = setTimeout(() => controller.abort(), timeoutMs)
-  try {
-    const res = await fetch(url, { ...options, signal: controller.signal })
-    return res
-  } finally {
-    clearTimeout(timer)
-  }
-}
-
-async function fetchFreshM3u8(slug) {
-  const url = `${BASE_URL}/${slug}`
-  console.log('[FETCH FRESH]', url)
-  const res = await fetchWithTimeout(url, { headers: HEADERS }, 20000)
-  const html = await res.text()
-  const $ = cheerio.load(html)
-  const scripts = $('script').map((i, el) => $(el).html() || '').get().join('\n')
-
-  const b64match = scripts.match(/window\.atob\(["']([A-Za-z0-9+/=]+)["']\)/)
-  if (!b64match) throw new Error('Không tìm thấy base64 stream URL')
-
-  const masterUrl = Buffer.from(b64match[1], 'base64').toString('utf8')
-  console.log('[MASTER URL]', masterUrl)
-
-  if (!masterUrl.includes('.m3u8')) throw new Error('URL không phải m3u8: ' + masterUrl)
-  return masterUrl
-}
+// =============================================
+// THÊM PHIM VÀO ĐÂY
+// id: tự đặt (không dấu, không space)
+// name: tên hiển thị
+// fileId: lấy từ link Google Drive
+// poster: link ảnh bìa (tùy chọn)
+// =============================================
+const VIDEOS = [
+  {
+    id: 'phim-1',
+    name: 'Phim 1',
+    fileId: '1S91xehn-0zqRxW99FZ1b8be6JEo1TQ2L',
+    poster: '',
+    description: ''
+  },
+  // Thêm phim khác vào đây:
+  // {
+  //   id: 'phim-2',
+  //   name: 'Tên phim 2',
+  //   fileId: 'FILE_ID_TỪ_DRIVE',
+  //   poster: 'https://link-anh-bia.jpg',
+  //   description: 'Mô tả phim'
+  // },
+]
 
 const builder = new addonBuilder({
-  id: 'com.myaddon.javhd',
+  id: 'com.myfilms.gdrive',
   version: '1.0.0',
   name: ADDON_NAME,
   resources: ['catalog', 'meta', 'stream'],
   types: ['movie'],
   catalogs: [
-    { type: 'movie', id: 'javhd-movie', name: ADDON_NAME, extra: [{ name: 'skip' }] },
+    { type: 'movie', id: 'myfilms-catalog', name: ADDON_NAME, extra: [{ name: 'skip' }] }
   ]
 })
 
 builder.defineCatalogHandler(async ({ extra }) => {
-  const page = extra.skip ? Math.floor(extra.skip / 20) + 1 : 1
-  const url = `${BASE_URL}/video/page/${page}/`
-  try {
-    const res = await fetchWithTimeout(url, { headers: HEADERS })
-    const html = await res.text()
-    const $ = cheerio.load(html)
-    const metas = []
-    const seen = new Set()
-    $('a.movie-item.m-block').each((i, el) => {
-      const href = $(el).attr('href') || ''
-      const title = $(el).attr('title') || ''
-      const img = $(el).find('img').attr('src') || $(el).find('img').attr('data-src') || ''
-      const slug = href.replace(/^\//, '').replace(/\/$/, '')
-      if (!slug || !title || seen.has(slug)) return
-      seen.add(slug)
-      const poster = img.startsWith('http') ? img : `${BASE_URL}${img}`
-      metas.push({ id: `custom:${slug}`, type: 'movie', name: title, poster })
-    })
-    return { metas }
-  } catch (e) {
-    console.error('[CATALOG ERROR]', e.message)
-    return { metas: [] }
-  }
+  const skip = extra.skip ? parseInt(extra.skip) : 0
+  const metas = VIDEOS.slice(skip, skip + 20).map(v => ({
+    id: `myfilm:${v.id}`,
+    type: 'movie',
+    name: v.name,
+    poster: v.poster || `https://via.placeholder.com/300x450?text=${encodeURIComponent(v.name)}`
+  }))
+  return { metas }
 })
 
-builder.defineMetaHandler(async ({ type, id }) => {
-  const slug = id.replace('custom:', '')
-  const url = `${BASE_URL}/${slug}`
-  try {
-    const res = await fetchWithTimeout(url, { headers: HEADERS })
-    const html = await res.text()
-    const $ = cheerio.load(html)
-    const name = $('h1').first().text().trim()
-    const desc = $('p.hidden').first().text().trim()
-    const rawImg = $('img.public-film-item-thumb').first().attr('src') || $('img').first().attr('src') || ''
-    const poster = rawImg.startsWith('http') ? rawImg : `${BASE_URL}${rawImg}`
-    return { meta: { id, type, name: name || slug, description: desc, poster } }
-  } catch (e) {
-    console.error('[META ERROR]', e.message)
-    return { meta: { id, type, name: slug } }
+builder.defineMetaHandler(async ({ id }) => {
+  const key = id.replace('myfilm:', '')
+  const v = VIDEOS.find(x => x.id === key)
+  if (!v) return { meta: {} }
+  return {
+    meta: {
+      id,
+      type: 'movie',
+      name: v.name,
+      poster: v.poster || `https://via.placeholder.com/300x450?text=${encodeURIComponent(v.name)}`,
+      description: v.description || ''
+    }
   }
 })
 
 builder.defineStreamHandler(async ({ id }) => {
-  const slug = id.replace('custom:', '').split(':')[0]
-  console.log('[STREAM]', slug)
-  const redirectUrl = `${RENDER_URL}/stream-redirect?slug=${encodeURIComponent(slug)}`
+  const key = id.replace('myfilm:', '')
+  const v = VIDEOS.find(x => x.id === key)
+  if (!v) return { streams: [] }
+
+  const streamUrl = `${RENDER_URL}/gdrive?id=${v.fileId}`
   return {
-    streams: [{ url: redirectUrl, name: 'HD', title: 'HD' }]
+    streams: [{ url: streamUrl, name: 'HD', title: v.name }]
   }
 })
 
 const app = express()
 
+// Keep-alive
 app.get('/ping', (req, res) => {
   res.set('Cache-Control', 'no-cache')
   res.send('ok')
 })
-
 function keepAlive() {
   fetch(`${RENDER_URL}/ping`)
-    .then(() => console.log('[KEEP-ALIVE] ping ok'))
-    .catch(e => console.error('[KEEP-ALIVE ERROR]', e.message))
+    .then(() => console.log('[KEEP-ALIVE] ok'))
+    .catch(e => console.error('[KEEP-ALIVE]', e.message))
 }
 setTimeout(keepAlive, 5000)
 setInterval(keepAlive, 13 * 60 * 1000)
 
-app.get('/stream-redirect', async (req, res) => {
-  const slug = req.query.slug
-  if (!slug) return res.status(400).send('No slug')
+// Google Drive proxy — bypass redirect và stream thẳng
+app.get('/gdrive', async (req, res) => {
+  const fileId = req.query.id
+  if (!fileId) return res.status(400).send('No file ID')
+
   try {
-    const masterUrl = await fetchFreshM3u8(slug)
+    // Bước 1: lấy redirect URL thật từ Drive
+    const driveUrl = `https://drive.google.com/uc?export=download&id=${fileId}&confirm=t`
+    console.log('[GDRIVE] Fetching:', driveUrl)
 
-    const mRes = await fetchWithTimeout(masterUrl, { headers: HEADERS }, 15000)
-    const mText = await mRes.text()
-    const baseUrl = masterUrl.substring(0, masterUrl.lastIndexOf('/') + 1)
-    const lines = mText.split('\n').map(l => l.trim()).filter(Boolean)
-
-    let bestUrl = null
-    let bestHeight = 0
-
-    for (let i = 0; i < lines.length; i++) {
-      if (lines[i].startsWith('#EXT-X-STREAM-INF')) {
-        const resMatch = lines[i].match(/RESOLUTION=\d+x(\d+)/)
-        const height = resMatch ? parseInt(resMatch[1]) : 0
-        const subLine = lines[i + 1]
-        if (subLine && !subLine.startsWith('#') && height >= bestHeight) {
-          bestHeight = height
-          bestUrl = subLine.startsWith('http') ? subLine : baseUrl + subLine
-        }
+    const r1 = await fetch(driveUrl, {
+      redirect: 'manual',
+      headers: {
+        'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 Chrome/120 Safari/537.36'
       }
+    })
+
+    // Drive redirect sang URL thật
+    let finalUrl = r1.headers.get('location')
+
+    // Nếu không redirect, dùng luôn URL gốc
+    if (!finalUrl) {
+      finalUrl = driveUrl
     }
 
-    const finalUrl = bestUrl || masterUrl
-    console.log('[REDIRECT TO]', finalUrl)
-    res.redirect(`${RENDER_URL}/m3u8?url=${encodeURIComponent(finalUrl)}`)
-  } catch (e) {
-    console.error('[STREAM-REDIRECT ERROR]', e.message)
-    res.status(500).send('Lỗi lấy stream: ' + e.message)
-  }
-})
+    console.log('[GDRIVE] Final URL:', finalUrl)
 
-// Proxy AES-128 key
-app.get('/key', async (req, res) => {
-  const target = req.query.url
-  if (!target) return res.status(400).send('No URL')
-  try {
-    const r = await fetchWithTimeout(target, { headers: HEADERS }, 10000)
-    res.set('Content-Type', r.headers.get('content-type') || 'application/octet-stream')
-    res.set('Access-Control-Allow-Origin', '*')
-    res.set('Access-Control-Allow-Headers', '*')
-    r.body.pipe(res)
-  } catch (e) {
-    console.error('[KEY ERROR]', e.message)
-    res.status(500).send('error')
-  }
-})
-
-// M3U8 proxy — rewrite key, KHÔNG proxy .ts (để Stremio tự fetch thẳng CDN)
-app.get('/m3u8', async (req, res) => {
-  const target = req.query.url
-  if (!target) return res.status(400).send('No URL')
-  try {
-    const r = await fetchWithTimeout(target, { headers: HEADERS }, 15000)
-
-    if (!r.ok) {
-      console.error('[M3U8 ERROR] CDN trả về', r.status, target)
-      return res.status(502).send(`CDN trả về ${r.status}`)
-    }
-
-    res.set('Content-Type', 'application/vnd.apple.mpegurl')
-    res.set('Access-Control-Allow-Origin', '*')
-    res.set('Access-Control-Allow-Headers', '*')
-    res.set('Cache-Control', 'no-cache')
-
-    const text = await r.text()
-    const base = target.substring(0, target.lastIndexOf('/') + 1)
-
-    const rewritten = text.split('\n').map(line => {
-      const l = line.trim()
-      if (!l) return line
-
-      // Proxy key để tránh CORS
-      if (l.startsWith('#EXT-X-KEY')) {
-        return l.replace(/URI="([^"]+)"/, (match, keyUri) => {
-          const absKey = keyUri.startsWith('http') ? keyUri : base + keyUri
-          return `URI="${RENDER_URL}/key?url=${encodeURIComponent(absKey)}"`
-        })
+    // Bước 2: stream file về client
+    const rangeHeader = req.headers['range']
+    const r2 = await fetch(finalUrl, {
+      headers: {
+        'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 Chrome/120 Safari/537.36',
+        ...(rangeHeader ? { 'Range': rangeHeader } : {})
       }
+    })
 
-      if (l.startsWith('#')) return line
+    res.status(r2.status)
+    res.set('Content-Type', r2.headers.get('content-type') || 'video/mp4')
+    res.set('Access-Control-Allow-Origin', '*')
 
-      // Sub-playlist .m3u8 vẫn proxy
-      if (l.endsWith('.m3u8')) {
-        const abs = l.startsWith('http') ? l : base + l
-        return `${RENDER_URL}/m3u8?url=${encodeURIComponent(abs)}`
-      }
+    const cl = r2.headers.get('content-length')
+    if (cl) res.set('Content-Length', cl)
 
-      // ✅ .ts segment: trả URL tuyệt đối thẳng đến CDN, KHÔNG proxy qua server
-      const absTs = l.startsWith('http') ? l : base + l
-      return absTs
-    }).join('\n')
+    const cr = r2.headers.get('content-range')
+    if (cr) res.set('Content-Range', cr)
 
-    return res.send(rewritten)
+    if (r2.status === 206) res.set('Accept-Ranges', 'bytes')
+
+    r2.body.pipe(res)
   } catch (e) {
-    console.error('[M3U8 ERROR]', e.message)
-    res.status(500).send('error')
+    console.error('[GDRIVE ERROR]', e.message)
+    if (!res.headersSent) res.status(500).send('error')
   }
 })
 
 app.use('/', getRouter(builder.getInterface()))
 
 app.listen(PORT, '0.0.0.0', () => {
-  console.log(`✅ Addon chạy tại: http://localhost:${PORT}/manifest.json`)
+  console.log(`✅ Addon: http://localhost:${PORT}/manifest.json`)
 })
