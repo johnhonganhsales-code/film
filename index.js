@@ -57,7 +57,9 @@ builder.defineStreamHandler(async ({ id }) => {
   const key = id.replace('myfilm:', '')
   const v = VIDEOS.find(x => x.id === key)
   if (!v) return { streams: [] }
-  const streamUrl = `${RENDER_URL}/gdrive?id=${v.fileId}`
+
+  // Trả thẳng /gdrive-redirect để server resolve URL rồi redirect cho Stremio tự fetch
+  const streamUrl = `${RENDER_URL}/gdrive-redirect?id=${v.fileId}`
   return {
     streams: [{ url: streamUrl, name: 'HD', title: v.name }]
   }
@@ -77,71 +79,38 @@ function keepAlive() {
 setTimeout(keepAlive, 5000)
 setInterval(keepAlive, 13 * 60 * 1000)
 
-// Hàm lấy direct URL từ Google Drive (bypass virus scan warning)
-async function getGDriveDirectUrl(fileId) {
-  const baseUrl = `https://drive.google.com/uc?export=download&id=${fileId}`
-  const headers = {
-    'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 Chrome/120 Safari/537.36'
-  }
-
-  // Bước 1: request đầu để lấy cookie và confirm token
-  const r1 = await fetch(baseUrl, { headers, redirect: 'manual' })
-
-  // Nếu redirect thẳng → file nhỏ, dùng luôn
-  const loc1 = r1.headers.get('location')
-  if (loc1) return loc1
-
-  // File lớn → Drive trả về trang HTML với confirm token
-  const html = await r1.text()
-  const cookies = r1.headers.get('set-cookie') || ''
-
-  // Lấy confirm token từ form action hoặc link
-  const confirmMatch = html.match(/confirm=([0-9A-Za-z_-]+)/)
-  const uuidMatch = html.match(/uuid=([0-9A-Za-z_-]+)/)
-
-  if (confirmMatch) {
-    const confirm = confirmMatch[1]
-    const uuid = uuidMatch ? uuidMatch[1] : ''
-    const confirmUrl = `https://drive.usercontent.google.com/download?id=${fileId}&export=download&confirm=${confirm}${uuid ? '&uuid=' + uuid : ''}`
-    console.log('[GDRIVE] Confirm URL:', confirmUrl)
-    return confirmUrl
-  }
-
-  // Thử dùng usercontent domain trực tiếp
-  return `https://drive.usercontent.google.com/download?id=${fileId}&export=download&confirm=t`
-}
-
-app.get('/gdrive', async (req, res) => {
+// Resolve Drive URL rồi redirect thẳng — Stremio tự fetch, hỗ trợ range request
+app.get('/gdrive-redirect', async (req, res) => {
   const fileId = req.query.id
   if (!fileId) return res.status(400).send('No file ID')
 
   try {
-    console.log('[GDRIVE] FileID:', fileId)
-    const directUrl = await getGDriveDirectUrl(fileId)
-    console.log('[GDRIVE] Streaming from:', directUrl)
+    console.log('[GDRIVE] Resolving fileId:', fileId)
 
-    const rangeHeader = req.headers['range']
-    const streamRes = await fetch(directUrl, {
+    // Dùng drive.usercontent.google.com — hỗ trợ range và redirect tốt hơn
+    const url1 = `https://drive.usercontent.google.com/download?id=${fileId}&export=download&confirm=t`
+
+    // Follow redirect để lấy URL cuối cùng có token
+    const r1 = await fetch(url1, {
+      redirect: 'manual',
       headers: {
-        'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 Chrome/120 Safari/537.36',
-        ...(rangeHeader ? { 'Range': rangeHeader } : {})
+        'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 Chrome/120 Safari/537.36'
       }
     })
 
-    console.log('[GDRIVE] Response status:', streamRes.status)
+    const location = r1.headers.get('location')
+    console.log('[GDRIVE] Status:', r1.status, '| Location:', location)
 
-    res.status(streamRes.status)
-    res.set('Content-Type', streamRes.headers.get('content-type') || 'video/mp4')
-    res.set('Access-Control-Allow-Origin', '*')
-    res.set('Accept-Ranges', 'bytes')
+    if (location) {
+      // Redirect cho Stremio tự fetch URL thật
+      console.log('[GDRIVE] Redirecting to:', location)
+      return res.redirect(302, location)
+    }
 
-    const cl = streamRes.headers.get('content-length')
-    if (cl) res.set('Content-Length', cl)
+    // Không có redirect → dùng luôn url1
+    console.log('[GDRIVE] No redirect, using direct URL')
+    return res.redirect(302, url1)
 
-    const cr = streamRes.headers.get('content-range')
-    if (cr) res.set('Content-Range', cr)
-
-    streamRes.body.pipe(res)
   } catch (e) {
     console.error('[GDRIVE ERROR]', e.message)
     if (!res.headersSent) res.status(500).send('error: ' + e.message)
