@@ -17,7 +17,7 @@ const VIDEOS = [
 ]
 
 const builder = new addonBuilder({
-  id: 'com.myfilms.gdrive',
+  id: 'com.myfilms.gdrive2',
   version: '1.0.0',
   name: ADDON_NAME,
   resources: ['catalog', 'meta', 'stream'],
