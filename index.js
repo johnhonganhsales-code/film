@@ -14,7 +14,6 @@ const HEADERS = {
   'Origin': BASE_URL
 }
 
-// Fetch với timeout để tránh treo mãi
 async function fetchWithTimeout(url, options = {}, timeoutMs = 15000) {
   const controller = new AbortController()
   const timer = setTimeout(() => controller.abort(), timeoutMs)
@@ -116,7 +115,6 @@ builder.defineStreamHandler(async ({ id }) => {
             }
           }
 
-          // Nếu không parse được quality levels, dùng master trực tiếp
           if (!streams.length) {
             const proxyUrl = `${RENDER_URL}/m3u8?url=${encodeURIComponent(masterUrl)}`
             streams.push({ url: proxyUrl, name: 'HD', title: 'HD' })
@@ -143,24 +141,36 @@ builder.defineStreamHandler(async ({ id }) => {
 
 const app = express()
 
-// Health check & keep-alive endpoint
 app.get('/ping', (req, res) => {
   res.set('Cache-Control', 'no-cache')
   res.send('ok')
 })
 
-// Warm-up: tự ping ngay khi khởi động và mỗi 13 phút
 function keepAlive() {
   fetch(`${RENDER_URL}/ping`)
     .then(() => console.log('[KEEP-ALIVE] ping ok'))
     .catch(e => console.error('[KEEP-ALIVE ERROR]', e.message))
 }
-
-// Ping ngay sau 5 giây khởi động, rồi lặp lại mỗi 13 phút
 setTimeout(keepAlive, 5000)
 setInterval(keepAlive, 13 * 60 * 1000)
 
-// M3U8 proxy
+// ✅ Proxy AES-128 encryption key
+app.get('/key', async (req, res) => {
+  const target = req.query.url
+  if (!target) return res.status(400).send('No URL')
+  try {
+    const r = await fetchWithTimeout(target, { headers: HEADERS }, 10000)
+    res.set('Content-Type', r.headers.get('content-type') || 'application/octet-stream')
+    res.set('Access-Control-Allow-Origin', '*')
+    res.set('Access-Control-Allow-Headers', '*')
+    r.body.pipe(res)
+  } catch(e) {
+    console.error('[KEY ERROR]', e.message)
+    res.status(500).send('error')
+  }
+})
+
+// ✅ M3U8 proxy — rewrite EXT-X-KEY, .m3u8, và .ts
 app.get('/m3u8', async (req, res) => {
   const target = req.query.url
   if (!target) return res.status(400).send('No URL')
@@ -177,12 +187,23 @@ app.get('/m3u8', async (req, res) => {
 
     const rewritten = text.split('\n').map(line => {
       const l = line.trim()
-      if (!l || l.startsWith('#')) return line // giữ nguyên dòng gốc
+      if (!l) return line
+
+      // Rewrite EXT-X-KEY URI để proxy key qua server
+      if (l.startsWith('#EXT-X-KEY')) {
+        return l.replace(/URI="([^"]+)"/, (match, keyUri) => {
+          const absKey = keyUri.startsWith('http') ? keyUri : base + keyUri
+          return `URI="${RENDER_URL}/key?url=${encodeURIComponent(absKey)}"`
+        })
+      }
+
+      if (l.startsWith('#')) return line
+
       if (l.endsWith('.m3u8')) {
         const abs = l.startsWith('http') ? l : base + l
         return `${RENDER_URL}/m3u8?url=${encodeURIComponent(abs)}`
       }
-      // TS segments
+
       const absTs = l.startsWith('http') ? l : base + l
       return `${RENDER_URL}/ts?url=${encodeURIComponent(absTs)}`
     }).join('\n')
@@ -194,7 +215,7 @@ app.get('/m3u8', async (req, res) => {
   }
 })
 
-// TS segment proxy
+// ✅ TS segment proxy với đầy đủ headers
 app.get('/ts', async (req, res) => {
   const target = req.query.url
   if (!target) return res.status(400).send('No URL')
