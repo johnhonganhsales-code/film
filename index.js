@@ -46,6 +46,7 @@ builder.defineCatalogHandler(async ({ extra }) => {
     })
     return { metas }
   } catch(e) {
+    console.error('[CATALOG ERROR]', e.message)
     return { metas: [] }
   }
 })
@@ -63,6 +64,7 @@ builder.defineMetaHandler(async ({ type, id }) => {
     const poster = rawImg.startsWith('http') ? rawImg : `${BASE_URL}${rawImg}`
     return { meta: { id, type, name: name || slug, description: desc, poster } }
   } catch(e) {
+    console.error('[META ERROR]', e.message)
     return { meta: { id, type, name: slug } }
   }
 })
@@ -101,6 +103,7 @@ builder.defineStreamHandler(async ({ id }) => {
             }
           }
         } catch(e) {
+          console.error('[MASTER M3U8 ERROR]', e.message)
           const proxyUrl = `${RENDER_URL}/m3u8?url=${encodeURIComponent(masterUrl)}`
           streams.push({ url: proxyUrl, name: 'HD', title: 'HD' })
         }
@@ -113,33 +116,51 @@ builder.defineStreamHandler(async ({ id }) => {
 
     return { streams }
   } catch(e) {
+    console.error('[STREAM ERROR]', e.message)
     return { streams: [] }
   }
 })
 
 const app = express()
 
+// Keep-alive ping để Render không spin down
+app.get('/ping', (req, res) => res.send('ok'))
+
+setInterval(() => {
+  fetch(`${RENDER_URL}/ping`)
+    .then(() => console.log('[PING] keep-alive ok'))
+    .catch(e => console.error('[PING ERROR]', e.message))
+}, 14 * 60 * 1000) // mỗi 14 phút
+
 app.get('/m3u8', async (req, res) => {
   const target = req.query.url
   if (!target) return res.status(400).send('No URL')
   try {
     const r = await fetch(target, { headers: HEADERS })
+
     res.set('Content-Type', 'application/vnd.apple.mpegurl')
     res.set('Access-Control-Allow-Origin', '*')
+    res.set('Access-Control-Allow-Headers', '*')
+    res.set('Cache-Control', 'no-cache')
+
     const text = await r.text()
     const base = target.substring(0, target.lastIndexOf('/') + 1)
+
     const rewritten = text.split('\n').map(line => {
       const l = line.trim()
-      if (!l || l.startsWith('#')) return l
+      if (!l || l.startsWith('#')) return line // giữ nguyên dòng gốc, không trim
       if (l.endsWith('.m3u8')) {
         const abs = l.startsWith('http') ? l : base + l
         return `${RENDER_URL}/m3u8?url=${encodeURIComponent(abs)}`
       }
+      // TS segments
       const absTs = l.startsWith('http') ? l : base + l
       return `${RENDER_URL}/ts?url=${encodeURIComponent(absTs)}`
     }).join('\n')
+
     return res.send(rewritten)
   } catch(e) {
+    console.error('[M3U8 ERROR]', e.message)
     res.status(500).send('error')
   }
 })
@@ -148,11 +169,31 @@ app.get('/ts', async (req, res) => {
   const target = req.query.url
   if (!target) return res.status(400).send('No URL')
   try {
-    const r = await fetch(target, { headers: HEADERS })
-    res.set('Content-Type', r.headers.get('content-type') || 'video/mp2t')
+    const r = await fetch(target, {
+      headers: {
+        ...HEADERS,
+        'Range': req.headers['range'] || '',
+      }
+    })
+
+    // Forward status
+    res.status(r.status)
+
+    // Forward important headers
+    const ct = r.headers.get('content-type') || 'video/mp2t'
+    res.set('Content-Type', ct)
     res.set('Access-Control-Allow-Origin', '*')
+    res.set('Access-Control-Allow-Headers', '*')
+
+    const cl = r.headers.get('content-length')
+    if (cl) res.set('Content-Length', cl)
+
+    const cr = r.headers.get('content-range')
+    if (cr) res.set('Content-Range', cr)
+
     r.body.pipe(res)
   } catch(e) {
+    console.error('[TS ERROR]', e.message)
     res.status(500).send('error')
   }
 })
