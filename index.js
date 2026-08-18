@@ -57,9 +57,7 @@ builder.defineStreamHandler(async ({ id }) => {
   const key = id.replace('myfilm:', '')
   const v = VIDEOS.find(x => x.id === key)
   if (!v) return { streams: [] }
-
-  // Trả thẳng /gdrive-redirect để server resolve URL rồi redirect cho Stremio tự fetch
-  const streamUrl = `${RENDER_URL}/gdrive-redirect?id=${v.fileId}`
+  const streamUrl = `${RENDER_URL}/gdrive?id=${v.fileId}`
   return {
     streams: [{ url: streamUrl, name: 'HD', title: v.name }]
   }
@@ -79,37 +77,47 @@ function keepAlive() {
 setTimeout(keepAlive, 5000)
 setInterval(keepAlive, 13 * 60 * 1000)
 
-// Resolve Drive URL rồi redirect thẳng — Stremio tự fetch, hỗ trợ range request
-app.get('/gdrive-redirect', async (req, res) => {
+// Proxy thật sự với range request support
+// Google Drive usercontent hỗ trợ range nếu ta tự pipe đúng cách
+app.get('/gdrive', async (req, res) => {
   const fileId = req.query.id
   if (!fileId) return res.status(400).send('No file ID')
 
   try {
-    console.log('[GDRIVE] Resolving fileId:', fileId)
+    const driveUrl = `https://drive.usercontent.google.com/download?id=${fileId}&export=download&confirm=t&authuser=0`
+    console.log('[GDRIVE] Fetching:', fileId)
 
-    // Dùng drive.usercontent.google.com — hỗ trợ range và redirect tốt hơn
-    const url1 = `https://drive.usercontent.google.com/download?id=${fileId}&export=download&confirm=t`
-
-    // Follow redirect để lấy URL cuối cùng có token
-    const r1 = await fetch(url1, {
-      redirect: 'manual',
-      headers: {
-        'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 Chrome/120 Safari/537.36'
-      }
-    })
-
-    const location = r1.headers.get('location')
-    console.log('[GDRIVE] Status:', r1.status, '| Location:', location)
-
-    if (location) {
-      // Redirect cho Stremio tự fetch URL thật
-      console.log('[GDRIVE] Redirecting to:', location)
-      return res.redirect(302, location)
+    const headers = {
+      'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 Chrome/120 Safari/537.36',
+      'Cookie': 'NID=; CONSENT=YES+;'
     }
 
-    // Không có redirect → dùng luôn url1
-    console.log('[GDRIVE] No redirect, using direct URL')
-    return res.redirect(302, url1)
+    // Tambahkan range header jika ada
+    if (req.headers['range']) {
+      headers['Range'] = req.headers['range']
+      console.log('[GDRIVE] Range:', req.headers['range'])
+    }
+
+    const r = await fetch(driveUrl, { headers })
+    console.log('[GDRIVE] Status:', r.status, '| Content-Type:', r.headers.get('content-type'))
+
+    // Set response headers
+    res.status(r.status)
+    res.set('Content-Type', r.headers.get('content-type') || 'video/mp4')
+    res.set('Access-Control-Allow-Origin', '*')
+    res.set('Accept-Ranges', 'bytes')
+
+    const cl = r.headers.get('content-length')
+    if (cl) res.set('Content-Length', cl)
+
+    const cr = r.headers.get('content-range')
+    if (cr) res.set('Content-Range', cr)
+
+    r.body.pipe(res)
+
+    req.on('close', () => {
+      r.body.destroy()
+    })
 
   } catch (e) {
     console.error('[GDRIVE ERROR]', e.message)
