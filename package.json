@@ -1,12 +1,19 @@
 {
-  "name": "javhd-addon",
-  "version": "1.0.0",
+  "name": "myfilms-addon",
+  "version": "2.0.0",
   "main": "index.js",
-  "scripts": { "start": "node index.js" },
+  "scripts": {
+    "start": "node index.js",
+    "auth": "node auth.js"
+  },
   "dependencies": {
-    "stremio-addon-sdk": "*",
-    "node-fetch": "^2",
-    "cheerio": "*",
-    "express": "*"
+    "dotenv": "^17.4.2",
+    "express": "^4.18.2",
+    "input": "^1.0.1",
+    "stremio-addon-sdk": "^1.6.10",
+    "telegram": "^2.26.0"
+  },
+  "engines": {
+    "node": ">=18"
   }
 }
