@@ -101,15 +101,37 @@ builder.defineMetaHandler(async ({ type, id }) => {
 
 builder.defineStreamHandler(async ({ id }) => {
   const slug = id.replace('custom:', '').split(':')[0]
-  console.log('[STREAM]', slug)
+  try {
+    const masterUrl = await fetchFreshM3u8(slug)
+    
+    // Fetch master playlist để lấy link 1080p
+    const mRes = await fetchWithTimeout(masterUrl, { headers: HEADERS }, 15000)
+    const mText = await mRes.text()
+    const baseUrl = masterUrl.substring(0, masterUrl.lastIndexOf('/') + 1)
+    const lines = mText.split('\n').map(l => l.trim()).filter(Boolean)
 
-  // Trả về URL dạng /stream-redirect?slug=... 
-  // Stremio sẽ gọi endpoint này mỗi lần play → luôn lấy link m3u8 mới
-  const redirectUrl = `${RENDER_URL}/stream-redirect?slug=${encodeURIComponent(slug)}`
-  return {
-    streams: [
-      { url: redirectUrl, name: 'HD', title: 'HD' }
-    ]
+    const streams = []
+    for (let i = 0; i < lines.length; i++) {
+      if (lines[i].startsWith('#EXT-X-STREAM-INF')) {
+        const resMatch = lines[i].match(/RESOLUTION=\d+x(\d+)/)
+        const label = resMatch ? resMatch[1] + 'p' : 'HD'
+        const subLine = lines[i + 1]
+        if (subLine && !subLine.startsWith('#')) {
+          const subUrl = subLine.startsWith('http') ? subLine : baseUrl + subLine
+          // ⚠️ Trả thẳng URL CDN, không qua proxy
+          streams.push({ url: subUrl, name: label, title: label })
+        }
+      }
+    }
+
+    if (!streams.length) {
+      streams.push({ url: masterUrl, name: 'HD', title: 'HD' })
+    }
+
+    return { streams }
+  } catch (e) {
+    console.error('[STREAM ERROR]', e.message)
+    return { streams: [] }
   }
 })
 
