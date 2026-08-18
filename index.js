@@ -5,7 +5,8 @@ const express = require('express')
 
 const BASE_URL = 'https://javhdz.city'
 const ADDON_NAME = 'JAVHD'
-const PORT = 7000
+const PORT = process.env.PORT || 7000
+const RENDER_URL = 'https://film-rbkk.onrender.com'
 
 const HEADERS = {
   'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 Chrome/120 Safari/537.36',
@@ -81,7 +82,6 @@ builder.defineStreamHandler(async ({ id }) => {
     if (b64match) {
       const masterUrl = Buffer.from(b64match[1], 'base64').toString('utf8')
       if (masterUrl.includes('.m3u8')) {
-        console.log('[STREAM] Master:', masterUrl)
         try {
           const mRes  = await fetch(masterUrl, { headers: HEADERS })
           const mText = await mRes.text()
@@ -95,15 +95,14 @@ builder.defineStreamHandler(async ({ id }) => {
               const subLine = lines[i+1]
               if (subLine && !subLine.startsWith('#')) {
                 const subUrl = subLine.startsWith('http') ? subLine : baseUrl + subLine
-                // Proxy chỉ m3u8, segment .ts trả trực tiếp
-                streams.push({ url: subUrl, name: label, title: label })
-                console.log('[STREAM]', label, subUrl)
+                const proxyUrl = `${RENDER_URL}/m3u8?url=${encodeURIComponent(subUrl)}`
+                streams.push({ url: proxyUrl, name: label, title: label })
               }
             }
           }
         } catch(e) {
-          console.error('[STREAM] parse error:', e.message)
-          streams.push({ url: masterUrl, name: 'HD', title: 'HD' })
+          const proxyUrl = `${RENDER_URL}/m3u8?url=${encodeURIComponent(masterUrl)}`
+          streams.push({ url: proxyUrl, name: 'HD', title: 'HD' })
         }
       }
     }
@@ -114,43 +113,32 @@ builder.defineStreamHandler(async ({ id }) => {
 
     return { streams }
   } catch(e) {
-    console.error('[STREAM ERROR]', e.message)
     return { streams: [] }
   }
 })
 
-// ── EXPRESS ───────────────────────────────
 const app = express()
 
-// Proxy chỉ cho file .m3u8 — rewrite segment URLs thành URL tuyệt đối trực tiếp (không qua proxy)
 app.get('/m3u8', async (req, res) => {
   const target = req.query.url
   if (!target) return res.status(400).send('No URL')
   try {
-    console.log('[M3U8 PROXY]', target)
     const r = await fetch(target, { headers: HEADERS })
     res.set('Content-Type', 'application/vnd.apple.mpegurl')
     res.set('Access-Control-Allow-Origin', '*')
-
     const text = await r.text()
     const base = target.substring(0, target.lastIndexOf('/') + 1)
-
-    // Rewrite segment thành URL tuyệt đối — Stremio fetch trực tiếp
     const rewritten = text.split('\n').map(line => {
       const l = line.trim()
       if (!l || l.startsWith('#')) return l
-      // Nếu là m3u8 con, cũng proxy
       if (l.endsWith('.m3u8')) {
         const abs = l.startsWith('http') ? l : base + l
-        return `https://film-rbkk.onrender.com/m3u8?url=${encodeURIComponent(abs)}`
+        return `${RENDER_URL}/m3u8?url=${encodeURIComponent(abs)}`
       }
-      // Segment .ts — trả URL tuyệt đối thẳng
       return l.startsWith('http') ? l : base + l
     }).join('\n')
-
     return res.send(rewritten)
   } catch(e) {
-    console.error('[M3U8 ERROR]', e.message)
     res.status(500).send('error')
   }
 })
@@ -158,5 +146,5 @@ app.get('/m3u8', async (req, res) => {
 app.use('/', getRouter(builder.getInterface()))
 
 app.listen(PORT, '0.0.0.0', () => {
-  console.log(`✅ Addon chạy tại: https://film-rbkk.onrender.com/manifest.json`)
+  console.log(`✅ Addon chạy tại: http://localhost:${PORT}/manifest.json`)
 })
