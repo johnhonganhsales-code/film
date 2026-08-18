@@ -11,7 +11,7 @@ const VIDEOS = [
     id: 'phim-1',
     name: 'Phim 1',
     fileId: '1S91xehn-0zqRxW99FZ1b8be6JEo1TQ2L',
-    poster: 'https://drive.google.com/file/d/1gH5GztZbGPzpsMBYyKKKAQlPNzTbfz0Z/view?usp=sharing',
+    poster: 'https://drive.google.com/file/d/1gH5GztZbGPzpsMBYyKKKAQlPNzTbfz0Z/view?usp=drive_link',
     description: ''
   },
 ]
