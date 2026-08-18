@@ -1,0 +1,12 @@
+{
+  "name": "javhd-addon",
+  "version": "1.0.0",
+  "main": "index.js",
+  "scripts": { "start": "node index.js" },
+  "dependencies": {
+    "stremio-addon-sdk": "*",
+    "node-fetch": "^2",
+    "cheerio": "*",
+    "express": "*"
+  }
+}
