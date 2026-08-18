@@ -135,9 +135,23 @@ app.get('/m3u8', async (req, res) => {
         const abs = l.startsWith('http') ? l : base + l
         return `${RENDER_URL}/m3u8?url=${encodeURIComponent(abs)}`
       }
-      return l.startsWith('http') ? l : base + l
+      const absTs = l.startsWith('http') ? l : base + l
+      return `${RENDER_URL}/ts?url=${encodeURIComponent(absTs)}`
     }).join('\n')
     return res.send(rewritten)
+  } catch(e) {
+    res.status(500).send('error')
+  }
+})
+
+app.get('/ts', async (req, res) => {
+  const target = req.query.url
+  if (!target) return res.status(400).send('No URL')
+  try {
+    const r = await fetch(target, { headers: HEADERS })
+    res.set('Content-Type', r.headers.get('content-type') || 'video/mp2t')
+    res.set('Access-Control-Allow-Origin', '*')
+    r.body.pipe(res)
   } catch(e) {
     res.status(500).send('error')
   }
