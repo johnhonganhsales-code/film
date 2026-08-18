@@ -11,7 +11,7 @@ const VIDEOS = [
     id: 'phim-1',
     name: 'Phim 1',
     fileId: '1S91xehn-0zqRxW99FZ1b8be6JEo1TQ2L',
-    poster: 'https://drive.google.com/file/d/1gH5GztZbGPzpsMBYyKKKAQlPNzTbfz0Z/view?usp=drive_link',
+    poster: '',
     description: ''
   },
 ]
@@ -77,47 +77,115 @@ function keepAlive() {
 setTimeout(keepAlive, 5000)
 setInterval(keepAlive, 13 * 60 * 1000)
 
-// Proxy thật sự với range request support
-// Google Drive usercontent hỗ trợ range nếu ta tự pipe đúng cách
+// Lấy direct download URL từ Drive bằng cách follow tất cả redirect
+async function resolveGDriveUrl(fileId) {
+  const urls = [
+    // Thử nhiều format khác nhau
+    `https://drive.google.com/uc?id=${fileId}&export=download&confirm=t`,
+    `https://drive.usercontent.google.com/u/0/uc?id=${fileId}&export=download&confirm=t`,
+  ]
+
+  for (const startUrl of urls) {
+    try {
+      let currentUrl = startUrl
+      let cookies = ''
+
+      // Follow redirect tối đa 5 bước
+      for (let i = 0; i < 5; i++) {
+        const r = await fetch(currentUrl, {
+          redirect: 'manual',
+          headers: {
+            'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 Chrome/120 Safari/537.36',
+            ...(cookies ? { 'Cookie': cookies } : {})
+          }
+        })
+
+        // Thu thập cookie
+        const setCookie = r.headers.get('set-cookie')
+        if (setCookie) {
+          const newCookies = setCookie.split(',').map(c => c.split(';')[0].trim()).join('; ')
+          cookies = cookies ? cookies + '; ' + newCookies : newCookies
+        }
+
+        const loc = r.headers.get('location')
+        console.log(`[GDRIVE] Step ${i+1}: status=${r.status} loc=${loc ? loc.substring(0,80) : 'none'}`)
+
+        if (r.status === 200) {
+          const ct = r.headers.get('content-type') || ''
+          if (ct.includes('video') || ct.includes('octet-stream')) {
+            // Đây là file thật!
+            return { url: currentUrl, cookies }
+          }
+          // Là HTML → thử parse confirm token
+          const html = await r.text()
+          const confirmMatch = html.match(/confirm=([0-9A-Za-z_\-]+)/)
+          const uuidMatch = html.match(/uuid=([0-9A-Za-z_\-]+)/)
+          if (confirmMatch) {
+            const confirm = confirmMatch[1]
+            const uuid = uuidMatch ? uuidMatch[1] : ''
+            currentUrl = `https://drive.usercontent.google.com/download?id=${fileId}&export=download&confirm=${confirm}${uuid ? '&uuid='+uuid : ''}`
+            console.log('[GDRIVE] Found confirm token, new URL:', currentUrl.substring(0,100))
+            continue
+          }
+          break
+        }
+
+        if (r.status === 301 || r.status === 302 || r.status === 303 || r.status === 307 || r.status === 308) {
+          if (loc) {
+            currentUrl = loc
+            continue
+          }
+        }
+
+        break
+      }
+
+      return { url: currentUrl, cookies }
+    } catch(e) {
+      console.error('[GDRIVE] URL failed:', startUrl, e.message)
+    }
+  }
+
+  throw new Error('Không resolve được Drive URL')
+}
+
 app.get('/gdrive', async (req, res) => {
   const fileId = req.query.id
   if (!fileId) return res.status(400).send('No file ID')
 
   try {
-    const driveUrl = `https://drive.usercontent.google.com/download?id=${fileId}&export=download&confirm=t&authuser=0`
-    console.log('[GDRIVE] Fetching:', fileId)
+    console.log('[GDRIVE] Resolving:', fileId)
+    const { url: directUrl, cookies } = await resolveGDriveUrl(fileId)
+    console.log('[GDRIVE] Direct URL:', directUrl.substring(0, 100))
 
-    const headers = {
+    const rangeHeader = req.headers['range']
+    const fetchHeaders = {
       'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 Chrome/120 Safari/537.36',
-      'Cookie': 'NID=; CONSENT=YES+;'
+      ...(cookies ? { 'Cookie': cookies } : {}),
+      ...(rangeHeader ? { 'Range': rangeHeader } : {})
     }
 
-    // Tambahkan range header jika ada
-    if (req.headers['range']) {
-      headers['Range'] = req.headers['range']
-      console.log('[GDRIVE] Range:', req.headers['range'])
+    const r = await fetch(directUrl, { headers: fetchHeaders })
+    const ct = r.headers.get('content-type') || ''
+    console.log('[GDRIVE] Final status:', r.status, '| CT:', ct)
+
+    if (ct.includes('html')) {
+      console.error('[GDRIVE] Still getting HTML!')
+      return res.status(502).send('Drive trả về HTML, không phải video')
     }
 
-    const r = await fetch(driveUrl, { headers })
-    console.log('[GDRIVE] Status:', r.status, '| Content-Type:', r.headers.get('content-type'))
-
-    // Set response headers
     res.status(r.status)
-    res.set('Content-Type', r.headers.get('content-type') || 'video/mp4')
+    res.set('Content-Type', ct || 'video/mp4')
     res.set('Access-Control-Allow-Origin', '*')
     res.set('Accept-Ranges', 'bytes')
 
     const cl = r.headers.get('content-length')
     if (cl) res.set('Content-Length', cl)
-
     const cr = r.headers.get('content-range')
     if (cr) res.set('Content-Range', cr)
 
     r.body.pipe(res)
-
-    req.on('close', () => {
-      r.body.destroy()
-    })
+    req.on('close', () => r.body.destroy())
 
   } catch (e) {
     console.error('[GDRIVE ERROR]', e.message)
