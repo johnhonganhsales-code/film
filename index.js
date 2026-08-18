@@ -17,7 +17,7 @@ const VIDEOS = [
 ]
 
 const builder = new addonBuilder({
-  id: 'com.myfilms.gdrive2',
+  id: 'com.myfilms.gdrive3',
   version: '1.0.0',
   name: ADDON_NAME,
   resources: ['catalog', 'meta', 'stream'],
@@ -77,76 +77,67 @@ function keepAlive() {
 setTimeout(keepAlive, 5000)
 setInterval(keepAlive, 13 * 60 * 1000)
 
-// Lấy direct download URL từ Drive bằng cách follow tất cả redirect
 async function resolveGDriveUrl(fileId) {
-  const urls = [
-    // Thử nhiều format khác nhau
-    `https://drive.google.com/uc?id=${fileId}&export=download&confirm=t`,
-    `https://drive.usercontent.google.com/u/0/uc?id=${fileId}&export=download&confirm=t`,
-  ]
+  const UA = 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 Chrome/120 Safari/537.36'
+  let cookies = ''
 
-  for (const startUrl of urls) {
-    try {
-      let currentUrl = startUrl
-      let cookies = ''
+  // Bước 1: request đầu, lấy cookie + redirect
+  const url1 = `https://drive.google.com/uc?id=${fileId}&export=download`
+  const r1 = await fetch(url1, {
+    redirect: 'manual',
+    headers: { 'User-Agent': UA }
+  })
 
-      // Follow redirect tối đa 5 bước
-      for (let i = 0; i < 5; i++) {
-        const r = await fetch(currentUrl, {
-          redirect: 'manual',
-          headers: {
-            'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 Chrome/120 Safari/537.36',
-            ...(cookies ? { 'Cookie': cookies } : {})
-          }
-        })
+  // Thu cookie
+  const sc1 = r1.headers.get('set-cookie')
+  if (sc1) cookies = sc1.split(',').map(c => c.split(';')[0].trim()).join('; ')
 
-        // Thu thập cookie
-        const setCookie = r.headers.get('set-cookie')
-        if (setCookie) {
-          const newCookies = setCookie.split(',').map(c => c.split(';')[0].trim()).join('; ')
-          cookies = cookies ? cookies + '; ' + newCookies : newCookies
-        }
+  const loc1 = r1.headers.get('location')
+  console.log('[GDRIVE] Step1 status:', r1.status, 'loc:', loc1 ? loc1.substring(0, 80) : 'none')
 
-        const loc = r.headers.get('location')
-        console.log(`[GDRIVE] Step ${i+1}: status=${r.status} loc=${loc ? loc.substring(0,80) : 'none'}`)
+  let url2 = loc1 || url1
 
-        if (r.status === 200) {
-          const ct = r.headers.get('content-type') || ''
-          if (ct.includes('video') || ct.includes('octet-stream')) {
-            // Đây là file thật!
-            return { url: currentUrl, cookies }
-          }
-          // Là HTML → thử parse confirm token
-          const html = await r.text()
-          const confirmMatch = html.match(/confirm=([0-9A-Za-z_\-]+)/)
-          const uuidMatch = html.match(/uuid=([0-9A-Za-z_\-]+)/)
-          if (confirmMatch) {
-            const confirm = confirmMatch[1]
-            const uuid = uuidMatch ? uuidMatch[1] : ''
-            currentUrl = `https://drive.usercontent.google.com/download?id=${fileId}&export=download&confirm=${confirm}${uuid ? '&uuid='+uuid : ''}`
-            console.log('[GDRIVE] Found confirm token, new URL:', currentUrl.substring(0,100))
-            continue
-          }
-          break
-        }
+  // Bước 2: follow redirect, đọc HTML để lấy confirm + uuid
+  const r2 = await fetch(url2, {
+    redirect: 'follow',
+    headers: { 'User-Agent': UA, ...(cookies ? { Cookie: cookies } : {}) }
+  })
 
-        if (r.status === 301 || r.status === 302 || r.status === 303 || r.status === 307 || r.status === 308) {
-          if (loc) {
-            currentUrl = loc
-            continue
-          }
-        }
-
-        break
-      }
-
-      return { url: currentUrl, cookies }
-    } catch(e) {
-      console.error('[GDRIVE] URL failed:', startUrl, e.message)
-    }
+  const sc2 = r2.headers.get('set-cookie')
+  if (sc2) {
+    const c2 = sc2.split(',').map(c => c.split(';')[0].trim()).join('; ')
+    cookies = cookies ? cookies + '; ' + c2 : c2
   }
 
-  throw new Error('Không resolve được Drive URL')
+  const ct2 = r2.headers.get('content-type') || ''
+  console.log('[GDRIVE] Step2 status:', r2.status, 'ct:', ct2)
+
+  // Nếu không phải HTML → đây là file thật rồi
+  if (!ct2.includes('html')) {
+    return { url: url2, cookies }
+  }
+
+  // Parse HTML lấy confirm token và uuid
+  const html = await r2.text()
+
+  // Tìm confirm token trong form hoặc link
+  const confirmMatch = html.match(/[?&]confirm=([0-9A-Za-z_\-]+)/)
+  const uuidMatch = html.match(/[?&]uuid=([0-9A-Za-z_\-]+)/)
+
+  if (!confirmMatch) {
+    // Log 200 ký tự HTML để debug
+    console.error('[GDRIVE] Không tìm thấy confirm token. HTML snippet:', html.substring(0, 300))
+    throw new Error('Không tìm thấy confirm token trong HTML')
+  }
+
+  const confirm = confirmMatch[1]
+  const uuid = uuidMatch ? uuidMatch[1] : ''
+  console.log('[GDRIVE] confirm:', confirm, 'uuid:', uuid)
+
+  const finalUrl = `https://drive.usercontent.google.com/download?id=${fileId}&export=download&confirm=${confirm}${uuid ? '&uuid=' + uuid : ''}`
+  console.log('[GDRIVE] Final URL:', finalUrl)
+
+  return { url: finalUrl, cookies }
 }
 
 app.get('/gdrive', async (req, res) => {
@@ -154,24 +145,24 @@ app.get('/gdrive', async (req, res) => {
   if (!fileId) return res.status(400).send('No file ID')
 
   try {
-    console.log('[GDRIVE] Resolving:', fileId)
     const { url: directUrl, cookies } = await resolveGDriveUrl(fileId)
-    console.log('[GDRIVE] Direct URL:', directUrl.substring(0, 100))
 
     const rangeHeader = req.headers['range']
-    const fetchHeaders = {
-      'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 Chrome/120 Safari/537.36',
-      ...(cookies ? { 'Cookie': cookies } : {}),
-      ...(rangeHeader ? { 'Range': rangeHeader } : {})
-    }
+    const r = await fetch(directUrl, {
+      headers: {
+        'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 Chrome/120 Safari/537.36',
+        ...(cookies ? { Cookie: cookies } : {}),
+        ...(rangeHeader ? { Range: rangeHeader } : {})
+      }
+    })
 
-    const r = await fetch(directUrl, { headers: fetchHeaders })
     const ct = r.headers.get('content-type') || ''
-    console.log('[GDRIVE] Final status:', r.status, '| CT:', ct)
+    console.log('[GDRIVE] Stream status:', r.status, '| CT:', ct)
 
     if (ct.includes('html')) {
-      console.error('[GDRIVE] Still getting HTML!')
-      return res.status(502).send('Drive trả về HTML, không phải video')
+      const snippet = await r.text()
+      console.error('[GDRIVE] Vẫn HTML:', snippet.substring(0, 200))
+      return res.status(502).send('Drive vẫn trả HTML')
     }
 
     res.status(r.status)
