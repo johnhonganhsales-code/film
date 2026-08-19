@@ -32,7 +32,7 @@ function fetchCSV(url, redirectCount = 0) {
     }
     lib.get(url, options, (res) => {
       console.log(`[SHEET] HTTP status: ${res.statusCode} | URL: ${url.substring(0, 80)}...`)
-      if (res.statusCode === 301 || res.statusCode === 302 || res.statusCode === 303) {
+      if (res.statusCode === 301 || res.statusCode === 302 || res.statusCode === 303 || res.statusCode === 307 || res.statusCode === 308) {
         const location = res.headers.location
         console.log('[SHEET] Redirect ->', location)
         res.resume()
