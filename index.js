@@ -130,8 +130,63 @@ setInterval(keepAlive, 13 * 60 * 1000)
 
 app.get('/tgstream', async (req, res) => {
   const { chat, msg } = req.query
-  console.log('[TGSTREAM] Request:', chat, msg)
-  res.json({ ok: true, chat, msg })
+  if (!chat || !msg) return res.status(400).send('Thiếu chat hoặc msg')
+
+  try {
+    const { inputLocation, size, mimeType } = await getFileLocation(chat, parseInt(msg))
+    const client = await getTgClient()
+
+    const rangeHeader = req.headers['range']
+    let start = 0
+    let end = Math.min(size - 1, 5 * 1024 * 1024 - 1) // 5MB đầu
+
+    if (rangeHeader) {
+      const match = rangeHeader.match(/bytes=(\d+)-(\d*)/)
+      if (match) {
+        start = parseInt(match[1])
+        end = match[2] ? parseInt(match[2]) : Math.min(size - 1, start + 5 * 1024 * 1024 - 1)
+      }
+    }
+
+    end = Math.min(end, size - 1)
+    const chunkSize = end - start + 1
+
+    console.log(`[TGSTREAM] ${chat}:${msg} | ${(start/1024/1024).toFixed(1)}MB-${(end/1024/1024).toFixed(1)}MB | chunk=${chunkSize}`)
+
+    res.status(206)
+    res.set('Content-Type', mimeType)
+    res.set('Accept-Ranges', 'bytes')
+    res.set('Access-Control-Allow-Origin', '*')
+    res.set('Content-Range', `bytes ${start}-${end}/${size}`)
+
+    // Stream từng chunk 512KB
+    const PART = 512 * 1024
+    let sent = 0
+
+    while (sent < chunkSize) {
+      const partStart = start + sent
+      const partEnd = Math.min(partStart + PART - 1, end)
+      const partSize = partEnd - partStart + 1
+
+      const buf = await client.downloadFile(inputLocation, {
+        offset: partStart,
+        limit: partSize,
+        workers: 1,
+      })
+
+      if (!buf || buf.length === 0) break
+      res.write(buf.slice(0, Math.min(buf.length, chunkSize - sent)))
+      sent += Math.min(buf.length, chunkSize - sent)
+      if (res.destroyed) break
+    }
+
+    res.end()
+    console.log(`[TGSTREAM] Done ${sent} bytes`)
+
+  } catch (e) {
+    console.error('[TGSTREAM ERROR]', e.message)
+    if (!res.headersSent) res.status(500).send('Lỗi: ' + e.message)
+  }
 })
 
 app.use('/', getRouter(builder.getInterface()))
