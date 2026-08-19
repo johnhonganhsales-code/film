@@ -141,13 +141,13 @@ app.get('/tgstream', async (req, res) => {
 
     const rangeHeader = req.headers['range']
     let start = 0
-    let end = Math.min(size - 1, start + 5 * 1024 * 1024 - 1)
+    let end = Math.min(size - 1, start + 50 * 1024 * 1024 - 1)
 
     if (rangeHeader) {
       const match = rangeHeader.match(/bytes=(\d+)-(\d*)/)
       if (match) {
         start = parseInt(match[1])
-        end = match[2] ? parseInt(match[2]) : Math.min(size - 1, start + 5 * 1024 * 1024 - 1)
+        end = match[2] ? parseInt(match[2]) : Math.min(size - 1, start + 50 * 1024 * 1024 - 1)
       }
     }
     end = Math.min(end, size - 1)
