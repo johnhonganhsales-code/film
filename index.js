@@ -4,40 +4,17 @@ const { TelegramClient } = require('telegram')
 const { StringSession } = require('telegram/sessions')
 const { Api } = require('telegram/tl')
 
-// ─── CẤU HÌNH ────────────────────────────────────────────────────────────────
 const ADDON_NAME  = 'MyFilms'
 const PORT        = process.env.PORT        || 7000
 const RENDER_URL  = process.env.RENDER_URL  || 'https://film-rbkk.onrender.com'
-
 const TG_API_ID   = parseInt(process.env.TG_API_ID   || '0')
 const TG_API_HASH = process.env.TG_API_HASH           || ''
 const TG_SESSION  = process.env.TG_SESSION            || ''
 
 const VIDEOS = [
-  {
-    id: 'phim-1',
-    name: 'Phim 1',
-    chatId: '-1004309743217',
-    messageId: 18,
-    poster: '',
-    description: ''
-  },
-  {
-    id: 'phim-2',
-    name: 'Phim 2',
-    chatId: '-1004309743217',
-    messageId: 15,
-    poster: '',
-    description: ''
-  },
-  {
-    id: 'phim-3',
-    name: 'Phim 3',
-    chatId: '-1004309743217',
-    messageId: 16,
-    poster: '',
-    description: ''
-  },
+  { id: 'phim-1', name: 'Phim 1', chatId: '-1004309743217', messageId: 18, poster: '', description: '' },
+  { id: 'phim-2', name: 'Phim 2', chatId: '-1004309743217', messageId: 15, poster: '', description: '' },
+  { id: 'phim-3', name: 'Phim 3', chatId: '-1004309743217', messageId: 16, poster: '', description: '' },
 ]
 
 let tgClient = null
@@ -60,18 +37,14 @@ const locationCache = new Map()
 async function getFileLocation(chatId, messageId) {
   const cacheKey = `${chatId}:${messageId}`
   if (locationCache.has(cacheKey)) return locationCache.get(cacheKey)
-
   const client = await getTgClient()
   const entity = await client.getEntity(chatId)
   const messages = await client.getMessages(entity, { ids: [messageId] })
   if (!messages || messages.length === 0) throw new Error('Không tìm thấy message')
-
   const msg = messages[0]
   const media = msg.media
   if (!media) throw new Error('Message không có media')
-
   let inputLocation, size, mimeType
-
   if (media.document) {
     const doc = media.document
     mimeType = doc.mimeType
@@ -86,13 +59,10 @@ async function getFileLocation(chatId, messageId) {
   } else {
     throw new Error('Media không phải document/video: ' + media.className)
   }
-
   const info = { inputLocation, size, mimeType: mimeType || 'video/mp4' }
   locationCache.set(cacheKey, info)
   return info
 }
-
-// ─── STREMIO ADDON ────────────────────────────────────────────────────────────
 
 const builder = new addonBuilder({
   id: 'com.myfilms.telegram',
@@ -100,9 +70,7 @@ const builder = new addonBuilder({
   name: ADDON_NAME,
   resources: ['catalog', 'meta', 'stream'],
   types: ['movie'],
-  catalogs: [
-    { type: 'movie', id: 'myfilms-catalog', name: ADDON_NAME, extra: [{ name: 'skip' }] }
-  ]
+  catalogs: [{ type: 'movie', id: 'myfilms-catalog', name: ADDON_NAME, extra: [{ name: 'skip' }] }]
 })
 
 builder.defineCatalogHandler(async ({ extra }) => {
@@ -134,7 +102,6 @@ builder.defineStreamHandler(async ({ id }) => {
   const key = id.replace('myfilm:', '')
   const v = VIDEOS.find(x => x.id === key)
   if (!v) return { streams: [] }
-
   return {
     streams: [{
       url: `${RENDER_URL}/tgstream?chat=${encodeURIComponent(v.chatId)}&msg=${v.messageId}`,
@@ -143,8 +110,6 @@ builder.defineStreamHandler(async ({ id }) => {
     }]
   }
 })
-
-// ─── EXPRESS ─────────────────────────────────────────────────────────────────
 
 const app = express()
 
@@ -169,49 +134,6 @@ app.get('/tgstream', async (req, res) => {
   res.json({ ok: true, chat, msg })
 })
 
-  try {
-    const { inputLocation, size, mimeType } = await getFileLocation(chat, parseInt(msg))
-    const client = await getTgClient()
-
-    const rangeHeader = req.headers['range']
-    let start = 0
-    let end = Math.min(size - 1, start + 5 * 1024 * 1024)
-
-    if (rangeHeader) {
-      const match = rangeHeader.match(/bytes=(\d+)-(\d*)/)
-      if (match) {
-        start = parseInt(match[1])
-        end = match[2] ? parseInt(match[2]) : Math.min(size - 1, start + 5 * 1024 * 1024)
-      }
-    }
-
-    const chunkSize = end - start + 1
-
-    console.log(`[TGSTREAM] ${chat}:${msg} | start=${start} end=${end} size=${size}`)
-
-    const buffer = await client.downloadFile(inputLocation, {
-      dcId: 2,
-      offset: start,
-      limit: chunkSize,
-      workers: 1,
-    })
-
-    console.log(`[TGSTREAM] Got buffer: ${buffer.length} bytes`)
-
-    res.status(206)
-    res.set('Content-Type', mimeType)
-    res.set('Accept-Ranges', 'bytes')
-    res.set('Access-Control-Allow-Origin', '*')
-    res.set('Content-Length', String(buffer.length))
-    res.set('Content-Range', `bytes ${start}-${start + buffer.length - 1}/${size}`)
-    res.end(buffer)
-
-  } catch (e) {
-    console.error('[TGSTREAM ERROR]', e.message)
-    if (!res.headersSent) res.status(500).send('Lỗi: ' + e.message)
-  }
-})
-
 app.use('/', getRouter(builder.getInterface()))
 
 ;(async () => {
@@ -220,7 +142,6 @@ app.use('/', getRouter(builder.getInterface()))
   } catch (e) {
     console.error('[TG] Lỗi kết nối ban đầu:', e.message)
   }
-
   app.listen(PORT, '0.0.0.0', () => {
     console.log(`✅ Addon: http://localhost:${PORT}/manifest.json`)
   })
