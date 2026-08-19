@@ -216,43 +216,13 @@ app.get('/tgstream', async (req, res) => {
       res.set('Content-Range', `bytes ${start}-${end}/${size}`)
     }
 
-    console.log(`[TGSTREAM] ${chat}:${msg} | ${(start/1024/1024).toFixed(1)}MB - ${(end/1024/1024).toFixed(1)}MB`)
-
-    // gramjs iterDownload: stream theo chunk 512KB, bắt đầu từ offset đúng
-    const PART_SIZE = 512 * 1024
-
-    const alignedOffset = start - (start % PART_SIZE)
-    const iter = client.iterDownload({
-      file: inputLocation,
-      offset: BigInt(alignedOffset),
-      limit: BigInt(end - alignedOffset + PART_SIZE),
-      requestSize: PART_SIZE,
+    const buffer = await client.downloadFile(inputLocation, {
+      dcId: 5,
+      offset: start,
+      limit: chunkSize,
     })
 
-    let bytesSent = 0
-    let bytesToSkip = start % PART_SIZE
-
-    for await (const chunk of iter) {
-      if (res.destroyed) break
-
-      let slice = chunk
-      if (bytesToSkip > 0) {
-        slice = chunk.slice(bytesToSkip)
-        bytesToSkip = 0
-      }
-
-      const remaining = chunkSize - bytesSent
-      if (slice.length > remaining) {
-        slice = slice.slice(0, remaining)
-      }
-
-      res.write(slice)
-      bytesSent += slice.length
-
-      if (bytesSent >= chunkSize) break
-    }
-
-    res.end()
+    res.end(buffer)
 
   } catch (e) {
     console.error('[TGSTREAM ERROR]', e.message)
