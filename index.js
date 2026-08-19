@@ -219,18 +219,18 @@ app.get('/tgstream', async (req, res) => {
     console.log(`[TGSTREAM] ${chat}:${msg} | ${(start/1024/1024).toFixed(1)}MB - ${(end/1024/1024).toFixed(1)}MB`)
 
     // gramjs iterDownload: stream theo chunk 512KB, bắt đầu từ offset đúng
-    const PART_SIZE = 512 * 1024  // 512KB mỗi chunk (phải là bội số của 4KB)
+    const PART_SIZE = 512 * 1024
 
     const alignedOffset = start - (start % PART_SIZE)
-        const iter = client.iterDownload({
-          file: inputLocation,
-          offset: alignedOffset,
-          limit: end - alignedOffset + PART_SIZE,
-          requestSize: PART_SIZE,
+    const iter = client.iterDownload({
+      file: inputLocation,
+      offset: BigInt(alignedOffset),
+      limit: BigInt(end - alignedOffset + PART_SIZE),
+      requestSize: PART_SIZE,
     })
 
     let bytesSent = 0
-    let bytesToSkip = start % PART_SIZE  // phần thừa do align
+    let bytesToSkip = start % PART_SIZE
 
     for await (const chunk of iter) {
       if (res.destroyed) break
