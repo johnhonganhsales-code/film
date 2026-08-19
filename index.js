@@ -295,6 +295,21 @@ app.get('/tgstream', async (req, res) => {
   }
 })
 
+app.get('/debug/stream', async (req, res) => {
+  const { chat, msg } = req.query
+  if (!chat || !msg) return res.json({ error: 'Thiếu chat hoặc msg' })
+  try {
+    const info = await getFileLocation(chat, parseInt(msg))
+    res.json({
+      ok: true,
+      mimeType: info.mimeType,
+      sizeMB: (info.size / 1024 / 1024).toFixed(1)
+    })
+  } catch (e) {
+    res.json({ ok: false, error: e.message })
+  }
+})
+
 app.use('/', getRouter(builder.getInterface()))
 
 ;(async () => {
