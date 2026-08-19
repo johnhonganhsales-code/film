@@ -4,6 +4,7 @@ const { TelegramClient } = require('telegram')
 const { StringSession } = require('telegram/sessions')
 const { Api } = require('telegram/tl')
 const bigInt = require('big-integer')
+const https = require('https')
 
 const ADDON_NAME  = 'MyFilms'
 const PORT        = process.env.PORT        || 7000
@@ -11,12 +12,61 @@ const RENDER_URL  = process.env.RENDER_URL  || 'https://film-rbkk.onrender.com'
 const TG_API_ID   = parseInt(process.env.TG_API_ID   || '0')
 const TG_API_HASH = process.env.TG_API_HASH           || ''
 const TG_SESSION  = process.env.TG_SESSION            || ''
+const SHEET_CSV   = 'https://docs.google.com/spreadsheets/d/e/2PACX-1vRnqJip9m6pEIdp5jxw-Xqhj75g9Rz8Akdcpv5qJjU4q4hHAd1b6cwyMX5na-CBbUBE3-MzvRh7pqcC/pub?gid=0&single=true&output=csv'
 
-const VIDEOS = [
-  { id: 'phim-1', name: 'Phim 1', chatId: '-1004309743217', messageId: 18, poster: '', description: '' },
-  { id: 'phim-2', name: 'Phim 2', chatId: '-1004309743217', messageId: 15, poster: '', description: '' },
-  { id: 'phim-3', name: 'Phim 3', chatId: '-1004309743217', messageId: 16, poster: '', description: '' },
-]
+// Cache videos từ sheet
+let videosCache = []
+let lastFetch = 0
+const CACHE_TTL = 5 * 60 * 1000 // 5 phút
+
+function fetchCSV(url) {
+  return new Promise((resolve, reject) => {
+    https.get(url, (res) => {
+      // Follow redirects
+      if (res.statusCode === 301 || res.statusCode === 302) {
+        return fetchCSV(res.headers.location).then(resolve).catch(reject)
+      }
+      let data = ''
+      res.on('data', chunk => data += chunk)
+      res.on('end', () => resolve(data))
+    }).on('error', reject)
+  })
+}
+
+function parseCSV(text) {
+  const lines = text.trim().split('\n')
+  if (lines.length < 2) return []
+  // Skip header row
+  return lines.slice(1).map(line => {
+    const cols = line.split(',')
+    return {
+      id: (cols[0] || '').trim().replace(/"/g, ''),
+      name: (cols[1] || '').trim().replace(/"/g, ''),
+      chatId: (cols[2] || '').trim().replace(/"/g, ''),
+      messageId: parseInt((cols[3] || '0').trim().replace(/"/g, '')),
+      poster: (cols[4] || '').trim().replace(/"/g, ''),
+      description: (cols[5] || '').trim().replace(/"/g, ''),
+    }
+  }).filter(v => v.id && v.chatId && v.messageId)
+}
+
+async function getVideos() {
+  const now = Date.now()
+  if (videosCache.length > 0 && now - lastFetch < CACHE_TTL) {
+    return videosCache
+  }
+  try {
+    console.log('[SHEET] Fetching videos from Google Sheet...')
+    const csv = await fetchCSV(SHEET_CSV)
+    videosCache = parseCSV(csv)
+    lastFetch = now
+    console.log(`[SHEET] Loaded ${videosCache.length} videos`)
+  } catch (e) {
+    console.error('[SHEET ERROR]', e.message)
+    // Dùng cache cũ nếu fetch lỗi
+  }
+  return videosCache
+}
 
 let tgClient = null
 
@@ -75,8 +125,9 @@ const builder = new addonBuilder({
 })
 
 builder.defineCatalogHandler(async ({ extra }) => {
+  const videos = await getVideos()
   const skip = extra.skip ? parseInt(extra.skip) : 0
-  const metas = VIDEOS.slice(skip, skip + 20).map(v => ({
+  const metas = videos.slice(skip, skip + 20).map(v => ({
     id: `myfilm:${v.id}`,
     type: 'movie',
     name: v.name,
@@ -86,8 +137,9 @@ builder.defineCatalogHandler(async ({ extra }) => {
 })
 
 builder.defineMetaHandler(async ({ id }) => {
+  const videos = await getVideos()
   const key = id.replace('myfilm:', '')
-  const v = VIDEOS.find(x => x.id === key)
+  const v = videos.find(x => x.id === key)
   if (!v) return { meta: {} }
   return {
     meta: {
@@ -100,8 +152,9 @@ builder.defineMetaHandler(async ({ id }) => {
 })
 
 builder.defineStreamHandler(async ({ id }) => {
+  const videos = await getVideos()
   const key = id.replace('myfilm:', '')
-  const v = VIDEOS.find(x => x.id === key)
+  const v = videos.find(x => x.id === key)
   if (!v) return { streams: [] }
   return {
     streams: [{
@@ -137,7 +190,7 @@ app.get('/tgstream', async (req, res) => {
     const { inputLocation, size, mimeType } = await getFileLocation(chat, parseInt(msg))
     const client = await getTgClient()
 
-    const CHUNK_SIZE = 512 * 1024 // 512KB
+    const CHUNK_SIZE = 512 * 1024
 
     const rangeHeader = req.headers['range']
     let start = 0
@@ -161,7 +214,6 @@ app.get('/tgstream', async (req, res) => {
     res.set('Access-Control-Allow-Origin', '*')
     res.set('Content-Range', `bytes ${start}-${end}/${size}`)
 
-    // offset là BigInt (số byte), limit là số chunk
     const alignedStart = Math.floor(start / CHUNK_SIZE) * CHUNK_SIZE
     const bytesToSkip = start - alignedStart
     const numChunks = Math.ceil((chunkSize + bytesToSkip) / CHUNK_SIZE) + 1
@@ -177,16 +229,10 @@ app.get('/tgstream', async (req, res) => {
 
     for await (const chunk of iter) {
       if (res.destroyed) break
-
       let slice = Buffer.from(chunk)
-
-      if (bytesToSkip > 0 && bytesSent === 0) {
-        slice = slice.slice(bytesToSkip)
-      }
-
+      if (bytesToSkip > 0 && bytesSent === 0) slice = slice.slice(bytesToSkip)
       const remaining = chunkSize - bytesSent
       if (slice.length > remaining) slice = slice.slice(0, remaining)
-
       res.write(slice)
       bytesSent += slice.length
       if (bytesSent >= chunkSize) break
@@ -206,6 +252,7 @@ app.use('/', getRouter(builder.getInterface()))
 ;(async () => {
   try {
     await getTgClient()
+    await getVideos() // Load videos lúc khởi động
   } catch (e) {
     console.error('[TG] Lỗi kết nối ban đầu:', e.message)
   }
