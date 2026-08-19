@@ -22,23 +22,23 @@ const VIDEOS = [
   {
     id: 'phim-1',
     name: 'Phim 1',
-    chatId: '-1004309743217',
-    messageId: 3,
+    chatId: '-4309743217',
+    messageId: 18,
     poster: '',
     description: ''
   },
   {
     id: 'phim-2',
     name: 'Phim 2',
-    chatId: '-1001234567890',
-    messageId: 456,
+    chatId: '-4309743217',
+    messageId: 15,
     poster: '',
     description: ''
   },
   {
     id: 'phim-3',
     name: 'Phim 3',
-    chatId: '4309743217',
+    chatId: '-4309743217',
     messageId: 5,
     poster: '',
     description: ''
