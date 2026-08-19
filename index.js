@@ -165,7 +165,9 @@ setInterval(keepAlive, 13 * 60 * 1000)
 
 app.get('/tgstream', async (req, res) => {
   const { chat, msg } = req.query
-  if (!chat || !msg) return res.status(400).send('Thiếu chat hoặc msg')
+  console.log('[TGSTREAM] Request:', chat, msg)
+  res.json({ ok: true, chat, msg })
+})
 
   try {
     const { inputLocation, size, mimeType } = await getFileLocation(chat, parseInt(msg))
