@@ -9,15 +9,10 @@ const ADDON_NAME  = 'MyFilms'
 const PORT        = process.env.PORT        || 7000
 const RENDER_URL  = process.env.RENDER_URL  || 'https://film-rbkk.onrender.com'
 
-// Lấy tại https://my.telegram.org → App configuration
 const TG_API_ID   = parseInt(process.env.TG_API_ID   || '0')
 const TG_API_HASH = process.env.TG_API_HASH           || ''
-// Session string — chạy auth.js một lần để sinh ra chuỗi này
 const TG_SESSION  = process.env.TG_SESSION            || ''
 
-// Danh sách phim
-// chatId: username (@channel) hoặc số âm (-100xxx) của group/channel
-// messageId: ID của message chứa video/document
 const VIDEOS = [
   {
     id: 'phim-1',
@@ -43,15 +38,12 @@ const VIDEOS = [
     poster: '',
     description: ''
   },
-  
 ]
-// ─────────────────────────────────────────────────────────────────────────────
 
 let tgClient = null
 
 async function getTgClient() {
   if (tgClient && tgClient.connected) return tgClient
-
   console.log('[TG] Đang kết nối MTProto...')
   const session = new StringSession(TG_SESSION)
   tgClient = new TelegramClient(session, TG_API_ID, TG_API_HASH, {
@@ -63,7 +55,6 @@ async function getTgClient() {
   return tgClient
 }
 
-// Cache: cacheKey -> { inputLocation, dcId, size, accessHash }
 const locationCache = new Map()
 
 async function getFileLocation(chatId, messageId) {
@@ -71,22 +62,16 @@ async function getFileLocation(chatId, messageId) {
   if (locationCache.has(cacheKey)) return locationCache.get(cacheKey)
 
   const client = await getTgClient()
-
-  // Resolve entity (channel/group/user)
   const entity = await client.getEntity(chatId)
-
-  // Lấy message
   const messages = await client.getMessages(entity, { ids: [messageId] })
   if (!messages || messages.length === 0) throw new Error('Không tìm thấy message')
 
   const msg = messages[0]
   const media = msg.media
-
   if (!media) throw new Error('Message không có media')
 
   let inputLocation, size, mimeType
 
-  // Xử lý video (MessageMediaDocument với mime video/*)
   if (media.document) {
     const doc = media.document
     mimeType = doc.mimeType
@@ -152,14 +137,14 @@ builder.defineStreamHandler(async ({ id }) => {
 
   return {
     streams: [{
-      url: `${RENDER_URL}?chat=${encodeURIComponent(v.chatId)}&msg=${v.messageId}`,
+      url: `${RENDER_URL}/tgstream?chat=${encodeURIComponent(v.chatId)}&msg=${v.messageId}`,
       name: 'HD',
       title: `${v.name} [Telegram]`
     }]
   }
 })
 
-// ─── EXPRESS + STREAM PROXY ───────────────────────────────────────────────────
+// ─── EXPRESS ─────────────────────────────────────────────────────────────────
 
 const app = express()
 
@@ -168,7 +153,6 @@ app.get('/ping', (req, res) => {
   res.send('ok')
 })
 
-// Keep-alive
 function keepAlive() {
   const http = require('http')
   const url = new URL(RENDER_URL + '/ping')
@@ -179,12 +163,6 @@ function keepAlive() {
 setTimeout(keepAlive, 5000)
 setInterval(keepAlive, 13 * 60 * 1000)
 
-/**
- * ?chat=@channel&msg=123
- *
- * Hỗ trợ HTTP Range (seek) bằng cách dùng gramjs iterDownload
- * để stream thẳng từ Telegram DC về client mà không lưu disk.
- */
 app.get('/tgstream', async (req, res) => {
   const { chat, msg } = req.query
   if (!chat || !msg) return res.status(400).send('Thiếu chat hoặc msg')
@@ -193,9 +171,11 @@ app.get('/tgstream', async (req, res) => {
     const { inputLocation, size, mimeType } = await getFileLocation(chat, parseInt(msg))
     const client = await getTgClient()
 
+    const PART_SIZE = 512 * 1024 // 512KB - phải là bội số 4KB
+
     const rangeHeader = req.headers['range']
     let start = 0
-    let end = Math.min(size - 1, start + 10 * 1024 * 1024) // 10MB mỗi lần
+    let end = Math.min(size - 1, start + 10 * 1024 * 1024)
 
     if (rangeHeader) {
       const match = rangeHeader.match(/bytes=(\d+)-(\d*)/)
@@ -216,29 +196,35 @@ app.get('/tgstream', async (req, res) => {
 
     console.log(`[TGSTREAM] ${chat}:${msg} | ${(start/1024/1024).toFixed(1)}MB - ${(end/1024/1024).toFixed(1)}MB`)
 
-    const PART_SIZE = 512 * 1024
-    const alignedStart = start - (start % PART_SIZE)
-    const bytesToSkip = start - alignedStart
+    // gramjs 2.26: offset tính bằng số chunk (không phải byte)
+    const offsetChunk = Math.floor(start / PART_SIZE)
+    const bytesToSkip = start - offsetChunk * PART_SIZE
     let bytesSent = 0
 
-    for await (const chunk of client.iterDownload({
+    const iter = client.iterDownload({
       file: inputLocation,
-      offset: BigInt(alignedStart),
+      offset: offsetChunk * PART_SIZE,
       limit: chunkSize + bytesToSkip + PART_SIZE,
       requestSize: PART_SIZE,
-    })) {
+    })
+
+    for await (const chunk of iter) {
       if (res.destroyed) break
 
-      let slice = chunk
-      if (bytesToSkip > bytesSent && bytesSent === 0) {
-        slice = chunk.slice(bytesToSkip)
+      let slice = Buffer.from(chunk)
+
+      if (bytesToSkip > 0 && bytesSent === 0) {
+        slice = slice.slice(bytesToSkip)
       }
 
       const remaining = chunkSize - bytesSent
-      if (slice.length > remaining) slice = slice.slice(0, remaining)
+      if (slice.length > remaining) {
+        slice = slice.slice(0, remaining)
+      }
 
       res.write(slice)
       bytesSent += slice.length
+
       if (bytesSent >= chunkSize) break
     }
 
@@ -252,13 +238,11 @@ app.get('/tgstream', async (req, res) => {
 
 app.use('/', getRouter(builder.getInterface()))
 
-// Khởi động: kết nối TG trước rồi mới listen
 ;(async () => {
   try {
     await getTgClient()
   } catch (e) {
     console.error('[TG] Lỗi kết nối ban đầu:', e.message)
-    console.error('     → Chạy auth.js để tạo TG_SESSION trước')
   }
 
   app.listen(PORT, '0.0.0.0', () => {
