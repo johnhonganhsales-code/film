@@ -221,11 +221,12 @@ app.get('/tgstream', async (req, res) => {
     // gramjs iterDownload: stream theo chunk 512KB, bắt đầu từ offset đúng
     const PART_SIZE = 512 * 1024  // 512KB mỗi chunk (phải là bội số của 4KB)
 
-    const iter = client.iterDownload({
-      file: inputLocation,
-      offset: BigInt(start - (start % PART_SIZE)), // align về bội số PART_SIZE
-      limit: end - start + PART_SIZE,       // tải dư một chút để cover end
-      requestSize: PART_SIZE,
+    const alignedOffset = start - (start % PART_SIZE)
+        const iter = client.iterDownload({
+          file: inputLocation,
+          offset: alignedOffset,
+          limit: end - alignedOffset + PART_SIZE,
+          requestSize: PART_SIZE,
     })
 
     let bytesSent = 0
