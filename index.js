@@ -224,7 +224,7 @@ app.get('/tgstream', async (req, res) => {
     const iter = client.iterDownload({
       file: inputLocation,
       offset: BigInt(start - (start % PART_SIZE)), // align về bội số PART_SIZE
-      limit: BigInt(end - start + PART_SIZE),       // tải dư một chút để cover end
+      limit: end - start + PART_SIZE,       // tải dư một chút để cover end
       requestSize: PART_SIZE,
     })
 
