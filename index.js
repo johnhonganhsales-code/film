@@ -5,6 +5,7 @@ const { StringSession } = require('telegram/sessions')
 const { Api } = require('telegram/tl')
 const bigInt = require('big-integer')
 const https = require('https')
+const http = require('http')
 
 const ADDON_NAME  = 'MyFilms'
 const PORT        = process.env.PORT        || 7000
@@ -19,34 +20,74 @@ let videosCache = []
 let lastFetch = 0
 const CACHE_TTL = 5 * 60 * 1000 // 5 phút
 
-function fetchCSV(url) {
+function fetchCSV(url, redirectCount = 0) {
+  if (redirectCount > 5) return Promise.reject(new Error('Quá nhiều redirect'))
   return new Promise((resolve, reject) => {
-    https.get(url, (res) => {
-      // Follow redirects
-      if (res.statusCode === 301 || res.statusCode === 302) {
-        return fetchCSV(res.headers.location).then(resolve).catch(reject)
+    const lib = url.startsWith('https') ? https : http
+    const options = {
+      headers: {
+        'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36',
+        'Accept': 'text/csv,text/plain,*/*'
+      }
+    }
+    lib.get(url, options, (res) => {
+      console.log(`[SHEET] HTTP status: ${res.statusCode} | URL: ${url.substring(0, 80)}...`)
+      if (res.statusCode === 301 || res.statusCode === 302 || res.statusCode === 303) {
+        const location = res.headers.location
+        console.log('[SHEET] Redirect ->', location)
+        res.resume()
+        return fetchCSV(location, redirectCount + 1).then(resolve).catch(reject)
+      }
+      if (res.statusCode !== 200) {
+        return reject(new Error(`HTTP status: ${res.statusCode}`))
       }
       let data = ''
       res.on('data', chunk => data += chunk)
-      res.on('end', () => resolve(data))
-    }).on('error', reject)
+      res.on('end', () => {
+        console.log('[SHEET] CSV nhận được, độ dài:', data.length)
+        console.log('[SHEET] 3 dòng đầu:\n', data.split('\n').slice(0, 3).join('\n'))
+        resolve(data)
+      })
+    }).on('error', (err) => {
+      console.error('[SHEET] Fetch error:', err.message)
+      reject(err)
+    })
   })
 }
 
 function parseCSV(text) {
   const lines = text.trim().split('\n')
+  console.log('[SHEET] Tổng số dòng CSV:', lines.length)
   if (lines.length < 2) return []
   // Skip header row
-  return lines.slice(1).map(line => {
-    const cols = line.split(',')
-    return {
-      id: (cols[0] || '').trim().replace(/"/g, ''),
-      name: (cols[1] || '').trim().replace(/"/g, ''),
-      chatId: (cols[2] || '').trim().replace(/"/g, ''),
-      messageId: parseInt((cols[3] || '0').trim().replace(/"/g, '')),
-      poster: (cols[4] || '').trim().replace(/"/g, ''),
-      description: (cols[5] || '').trim().replace(/"/g, ''),
+  return lines.slice(1).map((line, idx) => {
+    // Xử lý CSV có thể có dấu phẩy trong nội dung (quoted fields)
+    const cols = []
+    let current = ''
+    let inQuotes = false
+    for (let i = 0; i < line.length; i++) {
+      const ch = line[i]
+      if (ch === '"') {
+        inQuotes = !inQuotes
+      } else if (ch === ',' && !inQuotes) {
+        cols.push(current.trim())
+        current = ''
+      } else {
+        current += ch
+      }
     }
+    cols.push(current.trim())
+
+    const entry = {
+      id: (cols[0] || '').trim(),
+      name: (cols[1] || '').trim(),
+      chatId: (cols[2] || '').trim(),
+      messageId: parseInt((cols[3] || '0').trim()),
+      poster: (cols[4] || '').trim(),
+      description: (cols[5] || '').trim(),
+    }
+    if (idx < 3) console.log(`[SHEET] Row ${idx + 1}:`, JSON.stringify(entry))
+    return entry
   }).filter(v => v.id && v.chatId && v.messageId)
 }
 
@@ -56,7 +97,8 @@ async function getVideos() {
     return videosCache
   }
   try {
-    console.log('[SHEET] Fetching videos from Google Sheet...')
+    console.log('[SHEET] Fetching videos từ Google Sheet...')
+    console.log('[SHEET] URL:', SHEET_CSV)
     const csv = await fetchCSV(SHEET_CSV)
     videosCache = parseCSV(csv)
     lastFetch = now
@@ -172,10 +214,16 @@ app.get('/ping', (req, res) => {
   res.send('ok')
 })
 
+// Debug endpoint: xem danh sách video đang cache
+app.get('/debug/videos', async (req, res) => {
+  const videos = await getVideos()
+  res.json({ count: videos.length, videos })
+})
+
 function keepAlive() {
-  const http = require('http')
   const url = new URL(RENDER_URL + '/ping')
-  http.get({ host: url.hostname, path: url.pathname, headers: { 'User-Agent': 'keepalive' } }, r => {
+  const lib = RENDER_URL.startsWith('https') ? https : http
+  lib.get({ hostname: url.hostname, path: url.pathname, headers: { 'User-Agent': 'keepalive' } }, r => {
     console.log('[KEEP-ALIVE] ok', r.statusCode)
   }).on('error', e => console.error('[KEEP-ALIVE]', e.message))
 }
@@ -258,5 +306,6 @@ app.use('/', getRouter(builder.getInterface()))
   }
   app.listen(PORT, '0.0.0.0', () => {
     console.log(`✅ Addon: http://localhost:${PORT}/manifest.json`)
+    console.log(`🔍 Debug: http://localhost:${PORT}/debug/videos`)
   })
 })()
