@@ -12,6 +12,7 @@
     "input": "^1.0.1",
     "stremio-addon-sdk": "^1.6.10",
     "telegram": "^2.26.0"
+    "big-integer": "^1.6.51"
   },
   "engines": {
     "node": ">=18"
