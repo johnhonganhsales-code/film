@@ -223,7 +223,7 @@ app.get('/tgstream', async (req, res) => {
 
     for await (const chunk of client.iterDownload({
       file: inputLocation,
-      offset: alignedStart,
+      offset: BigInt(alignedStart),
       limit: chunkSize + bytesToSkip + PART_SIZE,
       requestSize: PART_SIZE,
     })) {
