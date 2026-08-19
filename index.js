@@ -171,64 +171,38 @@ app.get('/tgstream', async (req, res) => {
     const { inputLocation, size, mimeType } = await getFileLocation(chat, parseInt(msg))
     const client = await getTgClient()
 
-    const PART_SIZE = 512 * 1024 // 512KB - phải là bội số 4KB
-
     const rangeHeader = req.headers['range']
     let start = 0
-    let end = Math.min(size - 1, start + 10 * 1024 * 1024)
+    let end = Math.min(size - 1, start + 5 * 1024 * 1024)
 
     if (rangeHeader) {
       const match = rangeHeader.match(/bytes=(\d+)-(\d*)/)
       if (match) {
         start = parseInt(match[1])
-        end = match[2] ? parseInt(match[2]) : Math.min(size - 1, start + 10 * 1024 * 1024)
+        end = match[2] ? parseInt(match[2]) : Math.min(size - 1, start + 5 * 1024 * 1024)
       }
     }
 
     const chunkSize = end - start + 1
 
+    console.log(`[TGSTREAM] ${chat}:${msg} | start=${start} end=${end} size=${size}`)
+
+    const buffer = await client.downloadFile(inputLocation, {
+      dcId: 2,
+      offset: start,
+      limit: chunkSize,
+      workers: 1,
+    })
+
+    console.log(`[TGSTREAM] Got buffer: ${buffer.length} bytes`)
+
     res.status(206)
     res.set('Content-Type', mimeType)
     res.set('Accept-Ranges', 'bytes')
     res.set('Access-Control-Allow-Origin', '*')
-    res.set('Content-Length', String(chunkSize))
-    res.set('Content-Range', `bytes ${start}-${end}/${size}`)
-
-    console.log(`[TGSTREAM] ${chat}:${msg} | ${(start/1024/1024).toFixed(1)}MB - ${(end/1024/1024).toFixed(1)}MB`)
-
-    // gramjs 2.26: offset tính bằng số chunk (không phải byte)
-    const offsetChunk = Math.floor(start / PART_SIZE)
-    const bytesToSkip = start - offsetChunk * PART_SIZE
-    let bytesSent = 0
-
-    const iter = client.iterDownload({
-      file: inputLocation,
-      offset: offsetChunk * PART_SIZE,
-      limit: chunkSize + bytesToSkip + PART_SIZE,
-      requestSize: PART_SIZE,
-    })
-
-    for await (const chunk of iter) {
-      if (res.destroyed) break
-
-      let slice = Buffer.from(chunk)
-
-      if (bytesToSkip > 0 && bytesSent === 0) {
-        slice = slice.slice(bytesToSkip)
-      }
-
-      const remaining = chunkSize - bytesSent
-      if (slice.length > remaining) {
-        slice = slice.slice(0, remaining)
-      }
-
-      res.write(slice)
-      bytesSent += slice.length
-
-      if (bytesSent >= chunkSize) break
-    }
-
-    res.end()
+    res.set('Content-Length', String(buffer.length))
+    res.set('Content-Range', `bytes ${start}-${start + buffer.length - 1}/${size}`)
+    res.end(buffer)
 
   } catch (e) {
     console.error('[TGSTREAM ERROR]', e.message)
