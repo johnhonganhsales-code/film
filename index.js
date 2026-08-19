@@ -3,6 +3,7 @@ const express = require('express')
 const { TelegramClient } = require('telegram')
 const { StringSession } = require('telegram/sessions')
 const { Api } = require('telegram/tl')
+const bigInt = require('big-integer')
 
 const ADDON_NAME  = 'MyFilms'
 const PORT        = process.env.PORT        || 7000
@@ -136,9 +137,11 @@ app.get('/tgstream', async (req, res) => {
     const { inputLocation, size, mimeType } = await getFileLocation(chat, parseInt(msg))
     const client = await getTgClient()
 
+    const CHUNK_SIZE = 512 * 1024 // 512KB
+
     const rangeHeader = req.headers['range']
     let start = 0
-    let end = Math.min(size - 1, 5 * 1024 * 1024 - 1) // 5MB đầu
+    let end = Math.min(size - 1, start + 5 * 1024 * 1024 - 1)
 
     if (rangeHeader) {
       const match = rangeHeader.match(/bytes=(\d+)-(\d*)/)
@@ -147,11 +150,10 @@ app.get('/tgstream', async (req, res) => {
         end = match[2] ? parseInt(match[2]) : Math.min(size - 1, start + 5 * 1024 * 1024 - 1)
       }
     }
-
     end = Math.min(end, size - 1)
     const chunkSize = end - start + 1
 
-    console.log(`[TGSTREAM] ${chat}:${msg} | ${(start/1024/1024).toFixed(1)}MB-${(end/1024/1024).toFixed(1)}MB | chunk=${chunkSize}`)
+    console.log(`[TGSTREAM] ${chat}:${msg} | ${(start/1024/1024).toFixed(1)}MB-${(end/1024/1024).toFixed(1)}MB`)
 
     res.status(206)
     res.set('Content-Type', mimeType)
@@ -159,29 +161,39 @@ app.get('/tgstream', async (req, res) => {
     res.set('Access-Control-Allow-Origin', '*')
     res.set('Content-Range', `bytes ${start}-${end}/${size}`)
 
-    // Stream từng chunk 512KB
-    const PART = 512 * 1024
-    let sent = 0
+    // offset là BigInt (số byte), limit là số chunk
+    const alignedStart = Math.floor(start / CHUNK_SIZE) * CHUNK_SIZE
+    const bytesToSkip = start - alignedStart
+    const numChunks = Math.ceil((chunkSize + bytesToSkip) / CHUNK_SIZE) + 1
 
-    while (sent < chunkSize) {
-      const partStart = start + sent
-      const partEnd = Math.min(partStart + PART - 1, end)
-      const partSize = partEnd - partStart + 1
+    let bytesSent = 0
 
-      const buf = await client.downloadFile(inputLocation, {
-        offset: partStart,
-        limit: partSize,
-        workers: 1,
-      })
+    const iter = client.iterDownload({
+      file: inputLocation,
+      offset: bigInt(alignedStart),
+      limit: numChunks,
+      requestSize: CHUNK_SIZE,
+    })
 
-      if (!buf || buf.length === 0) break
-      res.write(buf.slice(0, Math.min(buf.length, chunkSize - sent)))
-      sent += Math.min(buf.length, chunkSize - sent)
+    for await (const chunk of iter) {
       if (res.destroyed) break
+
+      let slice = Buffer.from(chunk)
+
+      if (bytesToSkip > 0 && bytesSent === 0) {
+        slice = slice.slice(bytesToSkip)
+      }
+
+      const remaining = chunkSize - bytesSent
+      if (slice.length > remaining) slice = slice.slice(0, remaining)
+
+      res.write(slice)
+      bytesSent += slice.length
+      if (bytesSent >= chunkSize) break
     }
 
     res.end()
-    console.log(`[TGSTREAM] Done ${sent} bytes`)
+    console.log(`[TGSTREAM] Done ${bytesSent} bytes`)
 
   } catch (e) {
     console.error('[TGSTREAM ERROR]', e.message)
