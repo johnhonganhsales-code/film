@@ -152,7 +152,7 @@ builder.defineStreamHandler(async ({ id }) => {
 
   return {
     streams: [{
-      url: `${RENDER_URL}/tgstream?chat=${encodeURIComponent(v.chatId)}&msg=${v.messageId}`,
+      url: `${RENDER_URL}?chat=${encodeURIComponent(v.chatId)}&msg=${v.messageId}`,
       name: 'HD',
       title: `${v.name} [Telegram]`
     }]
@@ -180,7 +180,7 @@ setTimeout(keepAlive, 5000)
 setInterval(keepAlive, 13 * 60 * 1000)
 
 /**
- * /tgstream?chat=@channel&msg=123
+ * ?chat=@channel&msg=123
  *
  * Hỗ trợ HTTP Range (seek) bằng cách dùng gramjs iterDownload
  * để stream thẳng từ Telegram DC về client mà không lưu disk.
@@ -195,34 +195,54 @@ app.get('/tgstream', async (req, res) => {
 
     const rangeHeader = req.headers['range']
     let start = 0
-    let end = size - 1
+    let end = Math.min(size - 1, start + 10 * 1024 * 1024) // 10MB mỗi lần
 
     if (rangeHeader) {
       const match = rangeHeader.match(/bytes=(\d+)-(\d*)/)
       if (match) {
         start = parseInt(match[1])
-        end = match[2] ? parseInt(match[2]) : size - 1
+        end = match[2] ? parseInt(match[2]) : Math.min(size - 1, start + 10 * 1024 * 1024)
       }
     }
 
     const chunkSize = end - start + 1
 
-    res.status(rangeHeader ? 206 : 200)
+    res.status(206)
     res.set('Content-Type', mimeType)
     res.set('Accept-Ranges', 'bytes')
     res.set('Access-Control-Allow-Origin', '*')
     res.set('Content-Length', String(chunkSize))
-    if (rangeHeader) {
-      res.set('Content-Range', `bytes ${start}-${end}/${size}`)
+    res.set('Content-Range', `bytes ${start}-${end}/${size}`)
+
+    console.log(`[TGSTREAM] ${chat}:${msg} | ${(start/1024/1024).toFixed(1)}MB - ${(end/1024/1024).toFixed(1)}MB`)
+
+    const PART_SIZE = 512 * 1024
+    const alignedStart = start - (start % PART_SIZE)
+    const bytesToSkip = start - alignedStart
+    let bytesSent = 0
+
+    for await (const chunk of client.iterDownload({
+      file: inputLocation,
+      offset: alignedStart,
+      limit: chunkSize + bytesToSkip + PART_SIZE,
+      requestSize: PART_SIZE,
+    })) {
+      if (res.destroyed) break
+
+      let slice = chunk
+      if (bytesToSkip > bytesSent && bytesSent === 0) {
+        slice = chunk.slice(bytesToSkip)
+      }
+
+      const remaining = chunkSize - bytesSent
+      if (slice.length > remaining) slice = slice.slice(0, remaining)
+
+      res.write(slice)
+      bytesSent += slice.length
+      if (bytesSent >= chunkSize) break
     }
 
-    const buffer = await client.downloadFile(inputLocation, {
-      dcId: 5,
-      offset: start,
-      limit: chunkSize,
-    })
-
-    res.end(buffer)
+    res.end()
 
   } catch (e) {
     console.error('[TGSTREAM ERROR]', e.message)
