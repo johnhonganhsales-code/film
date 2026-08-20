@@ -228,6 +228,24 @@ function keepAlive() {
 setTimeout(keepAlive, 5000)
 setInterval(keepAlive, 8 * 60 * 1000) // 8 phút
 
+// Kiểm tra TG session mỗi 30 phút
+setInterval(async () => {
+  try {
+    const client = await getTgClient()
+    await client.getMe()
+    console.log('[TG] Session còn sống ✅')
+  } catch (e) {
+    console.error('[TG] Session chết, reconnect...', e.message)
+    tgClient = null
+    try {
+      await getTgClient()
+      console.log('[TG] Reconnect thành công ✅')
+    } catch (e2) {
+      console.error('[TG] Reconnect thất bại:', e2.message)
+    }
+  }
+}, 30 * 60 * 1000) // 30 phút
+
 app.get('/tgstream', async (req, res) => {
   const { chat, msg } = req.query
   if (!chat || !msg) return res.status(400).send('Thiếu chat hoặc msg')
