@@ -32,7 +32,7 @@ function fetchCSV(url, redirectCount = 0) {
     }
     lib.get(url, options, (res) => {
       console.log(`[SHEET] HTTP status: ${res.statusCode} | URL: ${url.substring(0, 80)}...`)
-      if (res.statusCode === 301 || res.statusCode === 302 || res.statusCode === 303 || res.statusCode === 307 || res.statusCode === 308) {
+      if ([301, 302, 303, 307, 308].includes(res.statusCode)) {
         const location = res.headers.location
         console.log('[SHEET] Redirect ->', location)
         res.resume()
@@ -45,7 +45,6 @@ function fetchCSV(url, redirectCount = 0) {
       res.on('data', chunk => data += chunk)
       res.on('end', () => {
         console.log('[SHEET] CSV nhận được, độ dài:', data.length)
-        console.log('[SHEET] 3 dòng đầu:\n', data.split('\n').slice(0, 3).join('\n'))
         resolve(data)
       })
     }).on('error', (err) => {
@@ -59,9 +58,7 @@ function parseCSV(text) {
   const lines = text.trim().split('\n')
   console.log('[SHEET] Tổng số dòng CSV:', lines.length)
   if (lines.length < 2) return []
-  // Skip header row
   return lines.slice(1).map((line, idx) => {
-    // Xử lý CSV có thể có dấu phẩy trong nội dung (quoted fields)
     const cols = []
     let current = ''
     let inQuotes = false
@@ -98,14 +95,12 @@ async function getVideos() {
   }
   try {
     console.log('[SHEET] Fetching videos từ Google Sheet...')
-    console.log('[SHEET] URL:', SHEET_CSV)
     const csv = await fetchCSV(SHEET_CSV)
     videosCache = parseCSV(csv)
     lastFetch = now
     console.log(`[SHEET] Loaded ${videosCache.length} videos`)
   } catch (e) {
     console.error('[SHEET ERROR]', e.message)
-    // Dùng cache cũ nếu fetch lỗi
   }
   return videosCache
 }
@@ -117,8 +112,9 @@ async function getTgClient() {
   console.log('[TG] Đang kết nối MTProto...')
   const session = new StringSession(TG_SESSION)
   tgClient = new TelegramClient(session, TG_API_ID, TG_API_HASH, {
-    connectionRetries: 5,
+    connectionRetries: 10,
     autoReconnect: true,
+    retryDelay: 1000,
   })
   await tgClient.connect()
   console.log('[TG] Đã kết nối MTProto ✅')
@@ -217,7 +213,6 @@ app.get('/ping', (req, res) => {
   res.send('ok')
 })
 
-// Debug endpoint: xem danh sách video đang cache
 app.get('/debug/videos', async (req, res) => {
   const videos = await getVideos()
   res.json({ count: videos.length, videos })
@@ -231,7 +226,7 @@ function keepAlive() {
   }).on('error', e => console.error('[KEEP-ALIVE]', e.message))
 }
 setTimeout(keepAlive, 5000)
-setInterval(keepAlive, 13 * 60 * 1000)
+setInterval(keepAlive, 8 * 60 * 1000) // 8 phút
 
 app.get('/tgstream', async (req, res) => {
   const { chat, msg } = req.query
@@ -242,22 +237,23 @@ app.get('/tgstream', async (req, res) => {
     const client = await getTgClient()
 
     const CHUNK_SIZE = 512 * 1024
+    const MAX_RANGE  = 10 * 1024 * 1024 // 10MB mỗi request
 
     const rangeHeader = req.headers['range']
     let start = 0
-    let end = Math.min(size - 1, start + 10 * 1024 * 1024 - 1)
+    let end   = Math.min(size - 1, MAX_RANGE - 1)
 
     if (rangeHeader) {
       const match = rangeHeader.match(/bytes=(\d+)-(\d*)/)
       if (match) {
         start = parseInt(match[1])
-        end = match[2] ? parseInt(match[2]) : Math.min(size - 1, start + 10 * 1024 * 1024 - 1)
+        end   = match[2] ? parseInt(match[2]) : Math.min(size - 1, start + MAX_RANGE - 1)
       }
     }
     end = Math.min(end, size - 1)
     const chunkSize = end - start + 1
 
-    console.log(`[TGSTREAM] ${chat}:${msg} | ${(start/1024/1024).toFixed(1)}MB-${(end/1024/1024).toFixed(1)}MB`)
+    console.log(`[TGSTREAM] ${chat}:${msg} | ${(start/1024/1024).toFixed(1)}MB-${(end/1024/1024).toFixed(1)}MB / ${(size/1024/1024).toFixed(1)}MB`)
 
     res.writeHead(206, {
       'Content-Type':   mimeType,
@@ -269,22 +265,22 @@ app.get('/tgstream', async (req, res) => {
     })
 
     const alignedStart = Math.floor(start / CHUNK_SIZE) * CHUNK_SIZE
-    const bytesToSkip = start - alignedStart
-    const numChunks = Math.ceil((chunkSize + bytesToSkip) / CHUNK_SIZE)
+    const bytesToSkip  = start - alignedStart
+    const numChunks    = Math.ceil((chunkSize + bytesToSkip) / CHUNK_SIZE)
 
     let bytesSent = 0
 
     const iter = client.iterDownload({
-      file: inputLocation,
-      offset: bigInt(alignedStart),
-      limit: numChunks,
+      file:        inputLocation,
+      offset:      bigInt(alignedStart),
+      limit:       numChunks,
       requestSize: CHUNK_SIZE,
     })
 
     for await (const chunk of iter) {
       if (res.destroyed) break
       let slice = Buffer.from(chunk)
-      if (bytesToSkip > 0 && bytesSent === 0) slice = slice.slice(bytesToSkip)
+      if (bytesSent === 0 && bytesToSkip > 0) slice = slice.slice(bytesToSkip)
       const remaining = chunkSize - bytesSent
       if (slice.length > remaining) slice = slice.slice(0, remaining)
       res.write(slice)
@@ -293,10 +289,11 @@ app.get('/tgstream', async (req, res) => {
     }
 
     res.end()
-    console.log(`[TGSTREAM] Done ${bytesSent} bytes`)
+    console.log(`[TGSTREAM] Done ${bytesSent}/${chunkSize} bytes`)
 
   } catch (e) {
     console.error('[TGSTREAM ERROR]', e.message)
+    tgClient = null // force reconnect lần sau
     if (!res.headersSent) res.status(500).send('Lỗi: ' + e.message)
   }
 })
@@ -321,7 +318,7 @@ app.use('/', getRouter(builder.getInterface()))
 ;(async () => {
   try {
     await getTgClient()
-    await getVideos() // Load videos lúc khởi động
+    await getVideos()
   } catch (e) {
     console.error('[TG] Lỗi kết nối ban đầu:', e.message)
   }
