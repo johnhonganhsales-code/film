@@ -200,7 +200,7 @@ builder.defineStreamHandler(async ({ id }) => {
   if (!v) return { streams: [] }
   return {
     streams: [{
-      url: `${RENDER_URL}/tgstream?chat=${encodeURIComponent(v.chatId)}&msg=${v.messageId}`,
+      url: `${RENDER_URL}?chat=${encodeURIComponent(v.chatId)}&msg=${v.messageId}`,
       name: 'HD',
       title: `${v.name} [Telegram]`
     }]
@@ -242,13 +242,13 @@ app.get('/tgstream', async (req, res) => {
 
     const rangeHeader = req.headers['range']
     let start = 0
-    let end = Math.min(size - 1, start + 20 * 1024 * 1024 - 1)
+    let end = Math.min(size - 1, start + 10 * 1024 * 1024 - 1)
 
     if (rangeHeader) {
       const match = rangeHeader.match(/bytes=(\d+)-(\d*)/)
       if (match) {
         start = parseInt(match[1])
-        end = match[2] ? parseInt(match[2]) : Math.min(size - 1, start + 20 * 1024 * 1024 - 1)
+        end = match[2] ? parseInt(match[2]) : Math.min(size - 1, start + 10 * 1024 * 1024 - 1)
       }
     }
     end = Math.min(end, size - 1)
@@ -256,15 +256,18 @@ app.get('/tgstream', async (req, res) => {
 
     console.log(`[TGSTREAM] ${chat}:${msg} | ${(start/1024/1024).toFixed(1)}MB-${(end/1024/1024).toFixed(1)}MB`)
 
-    res.status(206)
-    res.set('Content-Type', mimeType)
-    res.set('Accept-Ranges', 'bytes')
-    res.set('Access-Control-Allow-Origin', '*')
-    res.set('Content-Range', `bytes ${start}-${end}/${size}`)
+    res.writeHead(206, {
+      'Content-Type':   mimeType,
+      'Content-Length': chunkSize,
+      'Content-Range':  `bytes ${start}-${end}/${size}`,
+      'Accept-Ranges':  'bytes',
+      'Access-Control-Allow-Origin': '*',
+      'Cache-Control':  'no-cache',
+    })
 
     const alignedStart = Math.floor(start / CHUNK_SIZE) * CHUNK_SIZE
     const bytesToSkip = start - alignedStart
-    const numChunks = Math.ceil((chunkSize + bytesToSkip) / CHUNK_SIZE) + 1
+    const numChunks = Math.ceil((chunkSize + bytesToSkip) / CHUNK_SIZE)
 
     let bytesSent = 0
 
