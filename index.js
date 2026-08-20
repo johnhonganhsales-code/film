@@ -202,7 +202,7 @@ builder.defineStreamHandler(async ({ id }) => {
     streams: [{
       url: `${RENDER_URL}/tgstream?chat=${encodeURIComponent(v.chatId)}&msg=${v.messageId}`,
       name: 'HD',
-      title: `${v.name} [Telegram]`
+      title: `${v.name} [Telegram]`,
       behaviorHints: {
         notWebReady: true
       }
