@@ -200,9 +200,12 @@ builder.defineStreamHandler(async ({ id }) => {
   if (!v) return { streams: [] }
   return {
     streams: [{
-      url: `${RENDER_URL}?chat=${encodeURIComponent(v.chatId)}&msg=${v.messageId}`,
+      url: `${RENDER_URL}/tgstream?chat=${encodeURIComponent(v.chatId)}&msg=${v.messageId}`,
       name: 'HD',
       title: `${v.name} [Telegram]`
+      behaviorHints: {
+        notWebReady: true
+      }
     }]
   }
 })
