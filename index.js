@@ -123,9 +123,7 @@ async function getTgClient() {
 
 const locationCache = new Map()
 
-async function getFileLocation(chatId, messageId) {
-  const cacheKey = `${chatId}:${messageId}`
-  if (locationCache.has(cacheKey)) return locationCache.get(cacheKey)
+async function fetchFileLocation(chatId, messageId) {
   const client = await getTgClient()
   const entity = await client.getEntity(chatId)
   const messages = await client.getMessages(entity, { ids: [messageId] })
@@ -133,22 +131,24 @@ async function getFileLocation(chatId, messageId) {
   const msg = messages[0]
   const media = msg.media
   if (!media) throw new Error('Message không có media')
-  let inputLocation, size, mimeType
-  if (media.document) {
-    const doc = media.document
-    mimeType = doc.mimeType
-    size = Number(doc.size)
-    inputLocation = new Api.InputDocumentFileLocation({
-      id: doc.id,
-      accessHash: doc.accessHash,
-      fileReference: doc.fileReference,
-      thumbSize: ''
-    })
-    console.log(`[TG] Document: ${mimeType} | ${(size / 1024 / 1024).toFixed(1)} MB`)
-  } else {
-    throw new Error('Media không phải document/video: ' + media.className)
-  }
-  const info = { inputLocation, size, mimeType: mimeType || 'video/mp4' }
+  if (!media.document) throw new Error('Media không phải document/video: ' + media.className)
+  const doc = media.document
+  const mimeType = doc.mimeType
+  const size = Number(doc.size)
+  const inputLocation = new Api.InputDocumentFileLocation({
+    id: doc.id,
+    accessHash: doc.accessHash,
+    fileReference: doc.fileReference,
+    thumbSize: ''
+  })
+  console.log(`[TG] Document: ${mimeType} | ${(size / 1024 / 1024).toFixed(1)} MB`)
+  return { inputLocation, size, mimeType: mimeType || 'video/mp4' }
+}
+
+async function getFileLocation(chatId, messageId, forceRefresh = false) {
+  const cacheKey = `${chatId}:${messageId}`
+  if (!forceRefresh && locationCache.has(cacheKey)) return locationCache.get(cacheKey)
+  const info = await fetchFileLocation(chatId, messageId)
   locationCache.set(cacheKey, info)
   return info
 }
@@ -227,6 +227,12 @@ function keepAlive() {
 }
 setTimeout(keepAlive, 5000)
 setInterval(keepAlive, 8 * 60 * 1000) // 8 phút
+
+// Xóa locationCache mỗi 6 giờ để fileReference không expire
+setInterval(() => {
+  locationCache.clear()
+  console.log('[TG] Đã xóa locationCache, fileReference sẽ được fetch lại khi cần')
+}, 6 * 60 * 60 * 1000)
 
 // Kiểm tra TG session mỗi 30 phút
 setInterval(async () => {
@@ -311,6 +317,12 @@ app.get('/tgstream', async (req, res) => {
 
   } catch (e) {
     console.error('[TGSTREAM ERROR]', e.message)
+    // Nếu lỗi fileReference hết hạn → xóa cache, client sẽ fetch lại lần sau
+    if (e.message && (e.message.includes('FILE_REFERENCE') || e.message.includes('fileReference') || e.message.includes('file reference'))) {
+      const cacheKey = `${req.query.chat}:${req.query.msg}`
+      locationCache.delete(cacheKey)
+      console.log('[TG] Đã xóa cache fileReference, sẽ fetch lại lần sau')
+    }
     tgClient = null // force reconnect lần sau
     if (!res.headersSent) res.status(500).send('Lỗi: ' + e.message)
   }
