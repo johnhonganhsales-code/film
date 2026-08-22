@@ -82,6 +82,7 @@ function parseCSV(text) {
       messageId: parseInt((cols[3] || '0').trim()),
       poster: (cols[4] || '').trim(),
       description: (cols[5] || '').trim(),
+      background: (cols[6] || '').trim(),
     }
     if (idx < 3) console.log(`[SHEET] Row ${idx + 1}:`, JSON.stringify(entry))
     return entry
@@ -184,6 +185,7 @@ builder.defineMetaHandler(async ({ id }) => {
       id, type: 'movie',
       name: v.name,
       poster: v.poster || `https://via.placeholder.com/300x450?text=${encodeURIComponent(v.name)}`,
+      background: v.background || v.poster || '',
       description: v.description || ''
     }
   }
