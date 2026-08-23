@@ -9,11 +9,43 @@ const http = require('http')
 
 const ADDON_NAME  = 'MyFilms'
 const PORT        = process.env.PORT        || 7000
-const RENDER_URL  = process.env.RENDER_URL  || 'https://film-rbkk.onrender.com'
 const TG_API_ID   = parseInt(process.env.TG_API_ID   || '0')
 const TG_API_HASH = process.env.TG_API_HASH           || ''
 const TG_SESSION  = process.env.TG_SESSION            || ''
 const SHEET_CSV   = 'https://docs.google.com/spreadsheets/d/e/2PACX-1vRnqJip9m6pEIdp5jxw-Xqhj75g9Rz8Akdcpv5qJjU4q4hHAd1b6cwyMX5na-CBbUBE3-MzvRh7pqcC/pub?gid=0&single=true&output=csv'
+const URLS_CSV    = 'https://docs.google.com/spreadsheets/d/e/2PACX-1vRnqJip9m6pEIdp5jxw-Xqhj75g9Rz8Akdcpv5qJjU4q4hHAd1b6cwyMX5na-CBbUBE3-MzvRh7pqcC/pub?gid=1842191953&single=true&output=csv'
+
+// Danh sách URL render, tự động load từ sheet
+let renderUrls = []
+let currentUrlIndex = 0
+let RENDER_URL = process.env.RENDER_URL || ''
+
+async function loadRenderUrls() {
+  try {
+    const csv = await fetchCSV(URLS_CSV)
+    const lines = csv.trim().split('\n').slice(1) // bỏ header
+    const urls = lines
+      .map(line => {
+        const cols = line.split(',')
+        return (cols[1] || '').trim().replace(/"/g, '')
+      })
+      .filter(u => u.startsWith('http'))
+    if (urls.length > 0) {
+      renderUrls = urls
+      if (!RENDER_URL) RENDER_URL = renderUrls[0]
+      console.log(`[URL] Loaded ${renderUrls.length} URLs:`, renderUrls)
+    }
+  } catch (e) {
+    console.error('[URL ERROR]', e.message)
+  }
+}
+
+function nextRenderUrl() {
+  if (renderUrls.length === 0) return
+  currentUrlIndex = (currentUrlIndex + 1) % renderUrls.length
+  RENDER_URL = renderUrls[currentUrlIndex]
+  console.log(`[URL] Chuyển sang URL mới: ${RENDER_URL}`)
+}
 
 // Cache videos từ sheet
 let videosCache = []
@@ -220,20 +252,40 @@ app.get('/debug/videos', async (req, res) => {
   res.json({ count: videos.length, videos })
 })
 
+app.get('/debug/urls', (req, res) => {
+  res.json({ current: RENDER_URL, index: currentUrlIndex, all: renderUrls })
+})
+
 function keepAlive() {
-  const url = new URL(RENDER_URL + '/ping')
-  const lib = RENDER_URL.startsWith('https') ? https : http
-  lib.get({ hostname: url.hostname, path: url.pathname, headers: { 'User-Agent': 'keepalive' } }, r => {
-    console.log('[KEEP-ALIVE] ok', r.statusCode)
-  }).on('error', e => console.error('[KEEP-ALIVE]', e.message))
+  if (!RENDER_URL) return
+  try {
+    const url = new URL(RENDER_URL + '/ping')
+    const lib = RENDER_URL.startsWith('https') ? https : http
+    lib.get({ hostname: url.hostname, path: url.pathname, headers: { 'User-Agent': 'keepalive' } }, r => {
+      console.log('[KEEP-ALIVE] ok', r.statusCode)
+      // Nếu bị suspend (503) → chuyển sang URL tiếp theo
+      if (r.statusCode === 503 || r.statusCode === 502) {
+        console.log('[KEEP-ALIVE] Service bị suspend, chuyển URL...')
+        nextRenderUrl()
+      }
+    }).on('error', e => {
+      console.error('[KEEP-ALIVE]', e.message)
+      nextRenderUrl()
+    })
+  } catch (e) {
+    console.error('[KEEP-ALIVE URL ERROR]', e.message)
+  }
 }
 setTimeout(keepAlive, 5000)
 setInterval(keepAlive, 8 * 60 * 1000) // 8 phút
 
-// Xóa locationCache mỗi 6 giờ để fileReference không expire
+// Reload danh sách URL mỗi 1 giờ
+setInterval(loadRenderUrls, 60 * 60 * 1000)
+
+// Xóa locationCache mỗi 6 giờ
 setInterval(() => {
   locationCache.clear()
-  console.log('[TG] Đã xóa locationCache, fileReference sẽ được fetch lại khi cần')
+  console.log('[TG] Đã xóa locationCache')
 }, 6 * 60 * 60 * 1000)
 
 // Kiểm tra TG session mỗi 30 phút
@@ -252,7 +304,7 @@ setInterval(async () => {
       console.error('[TG] Reconnect thất bại:', e2.message)
     }
   }
-}, 30 * 60 * 1000) // 30 phút
+}, 30 * 60 * 1000)
 
 app.get('/tgstream', async (req, res) => {
   const { chat, msg } = req.query
@@ -263,7 +315,7 @@ app.get('/tgstream', async (req, res) => {
     const client = await getTgClient()
 
     const CHUNK_SIZE = 512 * 1024
-    const MAX_RANGE  = 10 * 1024 * 1024 // 10MB mỗi request
+    const MAX_RANGE  = 1 * 1024 * 1024 // 1MB mỗi request
 
     const rangeHeader = req.headers['range']
     let start = 0
@@ -319,13 +371,12 @@ app.get('/tgstream', async (req, res) => {
 
   } catch (e) {
     console.error('[TGSTREAM ERROR]', e.message)
-    // Nếu lỗi fileReference hết hạn → xóa cache, client sẽ fetch lại lần sau
     if (e.message && (e.message.includes('FILE_REFERENCE') || e.message.includes('fileReference') || e.message.includes('file reference'))) {
       const cacheKey = `${req.query.chat}:${req.query.msg}`
       locationCache.delete(cacheKey)
-      console.log('[TG] Đã xóa cache fileReference, sẽ fetch lại lần sau')
+      console.log('[TG] Đã xóa cache fileReference')
     }
-    tgClient = null // force reconnect lần sau
+    tgClient = null
     if (!res.headersSent) res.status(500).send('Lỗi: ' + e.message)
   }
 })
@@ -349,13 +400,15 @@ app.use('/', getRouter(builder.getInterface()))
 
 ;(async () => {
   try {
+    await loadRenderUrls() // Load danh sách URL trước
     await getTgClient()
     await getVideos()
   } catch (e) {
-    console.error('[TG] Lỗi kết nối ban đầu:', e.message)
+    console.error('[INIT ERROR]', e.message)
   }
   app.listen(PORT, '0.0.0.0', () => {
     console.log(`✅ Addon: http://localhost:${PORT}/manifest.json`)
     console.log(`🔍 Debug: http://localhost:${PORT}/debug/videos`)
+    console.log(`🌐 URL hiện tại: ${RENDER_URL}`)
   })
 })()
