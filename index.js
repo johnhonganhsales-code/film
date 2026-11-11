@@ -1,3 +1,6 @@
+// MyFilms addon v2.1.2 — GIỮ BÌA CŨ (sửa lỗi mất bìa của 2.1.0/2.1.1)
+//  Poster trong Sheet (Drive) dùng lại qua lh3 w300, tgthumb chỉ dự phòng
+//  khi Sheet trống. Phim tự quét + id phim-msg giữ nguyên từ 2.1.1.
 // MyFilms addon v2.1.1 — TỰ ĐỘNG HÓA (sửa 2 lỗi của 2.1.0)
 //  v2.1.1a: /tgthumb dùng iterDownload thay cho downloadFile (lỗi
 //           "fileSize.lesser is not a function").
@@ -201,14 +204,29 @@ function mostCommonChat(videos) {
   return best || ''
 }
 
-// --- Poster tự động: thumb Telegram, qua /tgthumb ---
-// Link Drive uc?id=... cũ (3-4MB, redirect, Stremio không hiện) bị thay bằng
-// /tgthumb. Link poster khác (lh3, ảnh trực tiếp...) thì giữ nguyên.
+// --- Poster: BÌA CŨ TRONG SHEET LÀ CHÍNH, tgthumb chỉ là dự phòng ---
+// v2.1.0/2.1.1 sai ở đây: thay hết link Drive bằng /tgthumb nên mất bìa cũ.
+// Bìa cũ là ảnh 1920x1080 mày làm riêng, thumb Telegram chỉ là frame video
+// 320x180, mờ và sai ý. v2.1.2 sửa lại:
+//  - Có poster trong Sheet -> dùng đúng ảnh đó. Nếu là Drive uc?id=...
+//    thì đổi sang lh3 ...=w300 (cùng 1 ảnh, chỉ ~70KB thay vì 3-4MB,
+//    đã kiểm tra 36/36 link Drive đều chạy qua lh3) để Stremio load được.
+//  - Không có poster trong Sheet -> mới dùng /tgthumb (tốt hơn ô xám).
+function driveIdFromUrl(p) {
+  const m = p.match(/drive\.google\.com\/uc\?id=([^&]+)/)
+    || p.match(/drive\.google\.com\/file\/d\/([^\/]+)/)
+    || p.match(/[?&]id=([A-Za-z0-9_-]{10,})/)
+  return m ? m[1] : ''
+}
 function posterUrl(v) {
   const p = (v.poster || '').trim()
-  if (p && !p.includes('drive.google.com/uc')) return p
+  if (p) {
+    const did = driveIdFromUrl(p)
+    if (did) return `https://lh3.googleusercontent.com/d/${did}=w300`
+    return p
+  }
   if (RENDER_URL) return `${RENDER_URL}/tgthumb?chat=${encodeURIComponent(v.chatId)}&msg=${v.messageId}`
-  return p || `https://via.placeholder.com/300x450?text=${encodeURIComponent(v.name)}`
+  return `https://via.placeholder.com/300x450?text=${encodeURIComponent(v.name)}`
 }
 
 async function getVideos() {
@@ -354,7 +372,7 @@ async function getThumbBuffer(chatId, messageId) {
 
 const builder = new addonBuilder({
   id: 'com.myfilms.telegram',
-  version: '2.1.1',
+  version: '2.1.2',
   name: ADDON_NAME,
   resources: ['catalog', 'meta', 'stream'],
   types: ['movie'],
