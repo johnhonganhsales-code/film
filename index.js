@@ -1,3 +1,22 @@
+// MyFilms addon v2.1.0 — TỰ ĐỘNG HÓA
+// Thay đổi so với bản 2.0.0 (film-main.zip):
+//  1. Poster tự động: không cần up Drive, không cần dán link poster nữa.
+//     Poster lấy từ thumb sẵn có của video trên Telegram, qua endpoint /tgthumb
+//     (nhỏ ~10-50KB, đúng tỉ lệ, không redirect — sửa luôn lỗi Stremio hiện icon).
+//     Link Drive uc?id=... cũ trong Sheet sẽ tự bị thay bằng /tgthumb.
+//  2. Phim tự động: server tự quét kênh Telegram, phim mới up lên kênh là
+//     tự xuất hiện trong Stremio sau tối đa 5 phút, không cần thêm dòng Sheet.
+//     Sheet chỉ còn là bảng GHI ĐÈ (đổi tên / mô tả / poster riêng nếu muốn).
+//  3. Không có secret nào hard-code trong file này. TG_API_ID / TG_API_HASH /
+//     TG_SESSION / TG_CHANNEL đặt trong Environment Variables của Render.
+//     KHÔNG commit file .env lên git, KHÔNG gửi file .env cho ai.
+//
+// Quy trình up phim mới sau bản này:
+//   - Up video lên kênh Telegram là xong. (Tên = caption dòng đầu, nếu không có
+//     caption thì lấy tên file, nếu không có nữa thì "Phim <messageId>".)
+//   - Muốn đổi tên đẹp hơn: thêm 1 dòng vào Sheet (id, name, chatId, messageId).
+//   - Không cần: up Drive, copy link poster, làm thumbnail.
+
 const { addonBuilder, getRouter } = require('stremio-addon-sdk')
 const express = require('express')
 const { TelegramClient } = require('telegram')
@@ -12,6 +31,7 @@ const PORT        = process.env.PORT        || 7000
 const TG_API_ID   = parseInt(process.env.TG_API_ID   || '0')
 const TG_API_HASH = process.env.TG_API_HASH           || ''
 const TG_SESSION  = process.env.TG_SESSION            || ''
+const TG_CHANNEL  = process.env.TG_CHANNEL            || ''
 const SHEET_CSV   = 'https://docs.google.com/spreadsheets/d/e/2PACX-1vRnqJip9m6pEIdp5jxw-Xqhj75g9Rz8Akdcpv5qJjU4q4hHAd1b6cwyMX5na-CBbUBE3-MzvRh7pqcC/pub?gid=0&single=true&output=csv'
 const URLS_CSV    = 'https://docs.google.com/spreadsheets/d/e/2PACX-1vRnqJip9m6pEIdp5jxw-Xqhj75g9Rz8Akdcpv5qJjU4q4hHAd1b6cwyMX5na-CBbUBE3-MzvRh7pqcC/pub?gid=1842191953&single=true&output=csv'
 
@@ -47,7 +67,7 @@ function nextRenderUrl() {
   console.log(`[URL] Chuyển sang URL mới: ${RENDER_URL}`)
 }
 
-// Cache videos từ sheet
+// Cache videos từ sheet + Telegram
 let videosCache = []
 let lastFetch = 0
 const CACHE_TTL = 5 * 60 * 1000 // 5 phút
@@ -121,20 +141,111 @@ function parseCSV(text) {
   }).filter(v => v.id && v.chatId && v.messageId)
 }
 
+// --- Tên phim tự động: "Ten Phim.mp4" -> "Ten Phim" ---
+function cleanFileName(fileName) {
+  return fileName
+    .replace(/\.(mp4|mkv|avi|mov|webm|m4v)$/i, '')
+    .replace(/[_\.]+/g, ' ')
+    .replace(/\s+/g, ' ')
+    .trim()
+}
+
+// --- Quét kênh Telegram: mỗi video = 1 phim, không cần Sheet ---
+async function getTelegramVideos(channelId) {
+  const client = await getTgClient()
+  const entity = await client.getEntity(channelId)
+  const out = []
+  for await (const msg of client.iterMessages(entity, { limit: 200 })) {
+    if (!msg.media || !msg.media.document) continue
+    const doc = msg.media.document
+    if (!doc.mimeType || !doc.mimeType.startsWith('video/')) continue
+
+    const caption = (msg.message || '').trim()
+    const lines = caption.split('\n').map(s => s.trim()).filter(Boolean)
+    let name = lines[0] || ''
+    if (!name) {
+      const fnAttr = (doc.attributes || []).find(a => a.className === 'DocumentAttributeFilename')
+      if (fnAttr && fnAttr.fileName) name = cleanFileName(fnAttr.fileName)
+    }
+    if (!name) name = `Phim ${msg.id}`
+
+    out.push({
+      id: `phim ${msg.id}`,
+      name,
+      chatId: String(channelId),
+      messageId: msg.id,
+      poster: '',
+      description: lines.slice(1).join('\n'),
+      background: '',
+      source: 'telegram',
+    })
+  }
+  out.sort((a, b) => a.messageId - b.messageId)
+  console.log(`[TG] Quét kênh ${channelId}: ${out.length} video`)
+  return out
+}
+
+function mostCommonChat(videos) {
+  const count = {}
+  for (const v of videos) count[v.chatId] = (count[v.chatId] || 0) + 1
+  let best = '', bestN = 0
+  for (const [chat, n] of Object.entries(count)) if (n > bestN) { best = chat; bestN = n }
+  return best || ''
+}
+
+// --- Poster tự động: thumb Telegram, qua /tgthumb ---
+// Link Drive uc?id=... cũ (3-4MB, redirect, Stremio không hiện) bị thay bằng
+// /tgthumb. Link poster khác (lh3, ảnh trực tiếp...) thì giữ nguyên.
+function posterUrl(v) {
+  const p = (v.poster || '').trim()
+  if (p && !p.includes('drive.google.com/uc')) return p
+  if (RENDER_URL) return `${RENDER_URL}/tgthumb?chat=${encodeURIComponent(v.chatId)}&msg=${v.messageId}`
+  return p || `https://via.placeholder.com/300x450?text=${encodeURIComponent(v.name)}`
+}
+
 async function getVideos() {
   const now = Date.now()
   if (videosCache.length > 0 && now - lastFetch < CACHE_TTL) {
     return videosCache
   }
+  // 1. Sheet (nếu còn): chỉ để ghi đè tên/mô tả/poster
+  let sheet = []
   try {
     console.log('[SHEET] Fetching videos từ Google Sheet...')
     const csv = await fetchCSV(SHEET_CSV)
-    videosCache = parseCSV(csv)
-    lastFetch = now
-    console.log(`[SHEET] Loaded ${videosCache.length} videos`)
+    sheet = parseCSV(csv)
+    console.log(`[SHEET] Loaded ${sheet.length} videos`)
   } catch (e) {
     console.error('[SHEET ERROR]', e.message)
   }
+  // 2. Quét kênh Telegram: nguồn chính, phim mới tự vào
+  const channelId = TG_CHANNEL || mostCommonChat(sheet) || '-1004309743217'
+  let auto = []
+  try {
+    auto = await getTelegramVideos(channelId)
+  } catch (e) {
+    console.error('[TG SCAN ERROR]', e.message)
+  }
+  // 3. Gộp: key = chatId:messageId, Sheet thắng (giữ nguyên id cũ "phim 1"...)
+  const byKey = new Map()
+  for (const v of auto) byKey.set(`${v.chatId}:${v.messageId}`, { ...v })
+  for (const s of sheet) {
+    const key = `${s.chatId}:${s.messageId}`
+    const cur = byKey.get(key)
+    if (cur) {
+      cur.id = s.id // giữ id cũ để Stremio không đổi phim
+      if (s.name) cur.name = s.name
+      if (s.description) cur.description = s.description
+      if (s.poster) cur.poster = s.poster
+      if (s.background) cur.background = s.background
+      cur.source = 'sheet+telegram'
+    } else {
+      byKey.set(key, { ...s, source: 'sheet' })
+    }
+  }
+  videosCache = [...byKey.values()].sort((a, b) => a.messageId - b.messageId)
+  lastFetch = now
+  console.log(`[VIDEOS] Tổng ${videosCache.length} phim (${auto.length} từ Telegram, ${sheet.length} dòng Sheet)`)
   return videosCache
 }
 
@@ -186,9 +297,44 @@ async function getFileLocation(chatId, messageId, forceRefresh = false) {
   return info
 }
 
+// --- Thumb của video: chỉ tải thumb (thumbSize), không tải cả video ---
+const thumbCache = new Map() // key -> { buf, mime, time }, tối đa 100 cái
+async function getThumbBuffer(chatId, messageId) {
+  const cacheKey = `${chatId}:${messageId}`
+  const cached = thumbCache.get(cacheKey)
+  if (cached && Date.now() - cached.time < 24 * 60 * 60 * 1000) return cached
+
+  const client = await getTgClient()
+  const entity = await client.getEntity(chatId)
+  const messages = await client.getMessages(entity, { ids: [messageId] })
+  if (!messages || messages.length === 0) throw new Error('Không tìm thấy message')
+  const doc = messages[0].media && messages[0].media.document
+  if (!doc) throw new Error('Message không có document')
+  const thumbs = (doc.thumbs || []).filter(t => t.className === 'PhotoSize' && t.w && t.h)
+  if (thumbs.length === 0) throw new Error('Video không có thumb')
+  thumbs.sort((a, b) => (a.w * a.h) - (b.w * b.h))
+  const thumb = thumbs[thumbs.length - 1] // thumb lớn nhất (thường 320px)
+  console.log(`[TGTHUMB] ${chatId}:${messageId} thumb ${thumb.w}x${thumb.h} type=${thumb.type} size=${thumb.size}`)
+
+  const loc = new Api.InputDocumentFileLocation({
+    id: doc.id,
+    accessHash: doc.accessHash,
+    fileReference: doc.fileReference,
+    thumbSize: thumb.type,
+  })
+  const buf = Buffer.from(await client.downloadFile(loc, { dcId: doc.dcId, fileSize: thumb.size }))
+  if (!buf || buf.length === 0) throw new Error('Thumb rỗng')
+  if (buf.length > 1024 * 1024) throw new Error('Thumb quá lớn, bỏ qua để tránh tải nhầm full video')
+  const mime = buf[0] === 0x89 && buf[1] === 0x50 ? 'image/png' : 'image/jpeg'
+  const entry = { buf, mime, time: Date.now() }
+  thumbCache.set(cacheKey, entry)
+  if (thumbCache.size > 100) thumbCache.delete(thumbCache.keys().next().value)
+  return entry
+}
+
 const builder = new addonBuilder({
   id: 'com.myfilms.telegram',
-  version: '2.0.0',
+  version: '2.1.0',
   name: ADDON_NAME,
   resources: ['catalog', 'meta', 'stream'],
   types: ['movie'],
@@ -202,7 +348,7 @@ builder.defineCatalogHandler(async ({ extra }) => {
     id: `myfilm:${v.id}`,
     type: 'movie',
     name: v.name,
-    poster: v.poster || `https://via.placeholder.com/300x450?text=${encodeURIComponent(v.name)}`
+    poster: posterUrl(v)
   }))
   return { metas }
 })
@@ -216,8 +362,8 @@ builder.defineMetaHandler(async ({ id }) => {
     meta: {
       id, type: 'movie',
       name: v.name,
-      poster: v.poster || `https://via.placeholder.com/300x450?text=${encodeURIComponent(v.name)}`,
-      background: v.background || v.poster || '',
+      poster: posterUrl(v),
+      background: (v.background && !v.background.includes('drive.google.com/uc')) ? v.background : posterUrl(v),
       description: v.description || ''
     }
   }
@@ -254,6 +400,25 @@ app.get('/debug/videos', async (req, res) => {
 
 app.get('/debug/urls', (req, res) => {
   res.json({ current: RENDER_URL, index: currentUrlIndex, all: renderUrls })
+})
+
+// Poster tự động từ thumb Telegram (dùng cho catalog + meta)
+app.get('/tgthumb', async (req, res) => {
+  const { chat, msg } = req.query
+  if (!chat || !msg) return res.status(400).send('Thiếu chat hoặc msg')
+  try {
+    const { buf, mime } = await getThumbBuffer(chat, parseInt(msg))
+    res.writeHead(200, {
+      'Content-Type': mime,
+      'Content-Length': buf.length,
+      'Cache-Control': 'public, max-age=86400',
+      'Access-Control-Allow-Origin': '*',
+    })
+    res.end(buf)
+  } catch (e) {
+    console.error('[TGTHUMB ERROR]', e.message)
+    if (!res.headersSent) res.status(404).send('Không có thumb: ' + e.message)
+  }
 })
 
 function keepAlive() {
