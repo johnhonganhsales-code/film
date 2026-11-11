@@ -1,3 +1,4 @@
+// MyFilms addon v2.1.3 — STREAM NHANH HƠN (chunk 1MB, range 10MB, cache + prefetch)
 // MyFilms addon v2.1.2 — GIỮ BÌA CŨ (sửa lỗi mất bìa của 2.1.0/2.1.1)
 //  Poster trong Sheet (Drive) dùng lại qua lh3 w300, tgthumb chỉ dự phòng
 //  khi Sheet trống. Phim tự quét + id phim-msg giữ nguyên từ 2.1.1.
@@ -372,7 +373,7 @@ async function getThumbBuffer(chatId, messageId) {
 
 const builder = new addonBuilder({
   id: 'com.myfilms.telegram',
-  version: '2.1.2',
+  version: '2.1.3',
   name: ADDON_NAME,
   resources: ['catalog', 'meta', 'stream'],
   types: ['movie'],
@@ -509,6 +510,64 @@ setInterval(async () => {
   }
 }, 30 * 60 * 1000)
 
+// --- Stream nhanh hơn (v2.1.3): chunk 1MB + cache + prefetch ---
+// Bản cũ: mỗi request chỉ trả tối đa 1MB, tải tuần tự từng chunk 512KB từ
+// Telegram, không cache, không đọc trước. Player cứ hết 1MB lại đứng chờ
+// request mới (đo live: 1MB mất 1.4-3.4s, TTFB 0.8-3.1s) nên hay đứng.
+// Bản này: chunk 1MB (tối đa của Telegram), 1 request trả tới 10MB,
+// cache 40 chunk gần nhất trong RAM (xem lại / tua lại là có ngay),
+// tải trước 2 chunk kế trong lúc player đang xem chunk hiện tại.
+const STREAM_CHUNK = 1024 * 1024
+const STREAM_MAX_RANGE = 10 * 1024 * 1024
+const STREAM_CACHE_MAX = 40 // 40MB RAM tối đa cho cache stream
+const STREAM_CACHE_TTL = 10 * 60 * 1000
+const streamChunkCache = new Map() // key "chat:msg:chunkIndex" -> { buf, time }
+const streamChunkInflight = new Map() // key -> Promise<Buffer>, chống tải trùng
+
+async function getStreamChunk(client, inputLocation, chat, msg, chunkIndex) {
+  const key = `${chat}:${msg}:${chunkIndex}`
+  const cached = streamChunkCache.get(key)
+  if (cached && Date.now() - cached.time < STREAM_CACHE_TTL) {
+    streamChunkCache.delete(key)
+    streamChunkCache.set(key, cached) // làm mới LRU
+    return cached.buf
+  }
+  if (streamChunkInflight.has(key)) return streamChunkInflight.get(key)
+  const p = (async () => {
+    const chunks = []
+    const iter = client.iterDownload({
+      file: inputLocation,
+      offset: bigInt(chunkIndex * STREAM_CHUNK),
+      limit: 1,
+      requestSize: STREAM_CHUNK,
+    })
+    for await (const c of iter) chunks.push(Buffer.from(c))
+    const buf = Buffer.concat(chunks)
+    if (!buf.length) throw new Error('Chunk rỗng')
+    streamChunkCache.set(key, { buf, time: Date.now() })
+    while (streamChunkCache.size > STREAM_CACHE_MAX) {
+      streamChunkCache.delete(streamChunkCache.keys().next().value)
+    }
+    return buf
+  })()
+  streamChunkInflight.set(key, p)
+  try {
+    return await p
+  } finally {
+    streamChunkInflight.delete(key)
+  }
+}
+
+function prefetchStreamChunks(client, inputLocation, chat, msg, fromIndex) {
+  for (let i = 0; i < 2; i++) {
+    const idx = fromIndex + i
+    const key = `${chat}:${msg}:${idx}`
+    if (streamChunkCache.has(key) || streamChunkInflight.has(key)) continue
+    getStreamChunk(client, inputLocation, chat, msg, idx)
+      .catch(e => console.error('[PREFETCH]', e.message))
+  }
+}
+
 app.get('/tgstream', async (req, res) => {
   const { chat, msg } = req.query
   if (!chat || !msg) return res.status(400).send('Thiếu chat hoặc msg')
@@ -517,8 +576,8 @@ app.get('/tgstream', async (req, res) => {
     const { inputLocation, size, mimeType } = await getFileLocation(chat, parseInt(msg))
     const client = await getTgClient()
 
-    const CHUNK_SIZE = 512 * 1024
-    const MAX_RANGE  = 1 * 1024 * 1024 // 1MB mỗi request
+    const CHUNK_SIZE = STREAM_CHUNK
+    const MAX_RANGE  = STREAM_MAX_RANGE // 10MB mỗi request (cũ: 1MB)
 
     const rangeHeader = req.headers['range']
     let start = 0
@@ -545,25 +604,18 @@ app.get('/tgstream', async (req, res) => {
       'Cache-Control':  'no-cache',
     })
 
-    const alignedStart = Math.floor(start / CHUNK_SIZE) * CHUNK_SIZE
-    const bytesToSkip  = start - alignedStart
-    const numChunks    = Math.ceil((chunkSize + bytesToSkip) / CHUNK_SIZE)
-
+    // Tải theo chunk 1MB (có cache + chống tải trùng), cắt đúng range
+    const firstChunk = Math.floor(start / CHUNK_SIZE)
+    const lastChunk  = Math.floor(end / CHUNK_SIZE)
     let bytesSent = 0
-
-    const iter = client.iterDownload({
-      file:        inputLocation,
-      offset:      bigInt(alignedStart),
-      limit:       numChunks,
-      requestSize: CHUNK_SIZE,
-    })
-
-    for await (const chunk of iter) {
+    for (let idx = firstChunk; idx <= lastChunk; idx++) {
       if (res.destroyed) break
-      let slice = Buffer.from(chunk)
-      if (bytesSent === 0 && bytesToSkip > 0) slice = slice.slice(bytesToSkip)
-      const remaining = chunkSize - bytesSent
-      if (slice.length > remaining) slice = slice.slice(0, remaining)
+      const buf = await getStreamChunk(client, inputLocation, chat, parseInt(msg), idx)
+      const chunkStart = idx * CHUNK_SIZE
+      const sliceStart = Math.max(start, chunkStart) - chunkStart
+      const sliceEnd = Math.min(end, chunkStart + buf.length - 1) - chunkStart + 1
+      const slice = buf.slice(sliceStart, sliceEnd)
+      if (slice.length === 0) continue
       res.write(slice)
       bytesSent += slice.length
       if (bytesSent >= chunkSize) break
@@ -571,6 +623,8 @@ app.get('/tgstream', async (req, res) => {
 
     res.end()
     console.log(`[TGSTREAM] Done ${bytesSent}/${chunkSize} bytes`)
+    // Đọc trước 2 chunk kế trong lúc player đang xem, không chặn response
+    if (!res.destroyed) prefetchStreamChunks(client, inputLocation, chat, parseInt(msg), lastChunk + 1)
 
   } catch (e) {
     console.error('[TGSTREAM ERROR]', e.message)
