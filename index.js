@@ -1,3 +1,8 @@
+// MyFilms addon v2.1.1 — TỰ ĐỘNG HÓA (sửa 2 lỗi của 2.1.0)
+//  v2.1.1a: /tgthumb dùng iterDownload thay cho downloadFile (lỗi
+//           "fileSize.lesser is not a function").
+//  v2.1.1b: id phim tự quét đổi thành "phim-msg<messageId>" để không trùng
+//           id Sheet "phim N" (msg 3 trùng phim 3 = msg 6).
 // MyFilms addon v2.1.0 — TỰ ĐỘNG HÓA
 // Thay đổi so với bản 2.0.0 (film-main.zip):
 //  1. Poster tự động: không cần up Drive, không cần dán link poster nữa.
@@ -170,7 +175,10 @@ async function getTelegramVideos(channelId) {
     if (!name) name = `Phim ${msg.id}`
 
     out.push({
-      id: `phim ${msg.id}`,
+      // id riêng "phim-msg<messageId>" để KHÔNG bao giờ trùng với id Sheet
+      // "phim 1", "phim 2"... (v2.1.0 dùng "phim <msg.id>" nên msg 3 trùng
+      // với phim 3 trong Sheet là msg 6, bấm vào là mở nhầm phim).
+      id: `phim-msg${msg.id}`,
       name,
       chatId: String(channelId),
       messageId: msg.id,
@@ -314,7 +322,7 @@ async function getThumbBuffer(chatId, messageId) {
   if (thumbs.length === 0) throw new Error('Video không có thumb')
   thumbs.sort((a, b) => (a.w * a.h) - (b.w * b.h))
   const thumb = thumbs[thumbs.length - 1] // thumb lớn nhất (thường 320px)
-  console.log(`[TGTHUMB] ${chatId}:${messageId} thumb ${thumb.w}x${thumb.h} type=${thumb.type} size=${thumb.size}`)
+  console.log(`[TGTHUMB] ${chatId}:${messageId} thumb ${thumb.w}x${thumb.h} type=${thumb.type} size=${String(thumb.size)}`)
 
   const loc = new Api.InputDocumentFileLocation({
     id: doc.id,
@@ -322,7 +330,19 @@ async function getThumbBuffer(chatId, messageId) {
     fileReference: doc.fileReference,
     thumbSize: thumb.type,
   })
-  const buf = Buffer.from(await client.downloadFile(loc, { dcId: doc.dcId, fileSize: thumb.size }))
+  // v2.1.0 dùng client.downloadFile(loc, { fileSize: thumb.size }) -> lỗi
+  // "fileSize.lesser is not a function" vì thumb.size không phải kiểu
+  // big-integer mà downloadFile đòi. Dùng iterDownload như /tgstream
+  // (đã chạy được), chỉ lấy 1 chunk 512KB là đủ cho thumb.
+  const chunks = []
+  const iter = client.iterDownload({
+    file: loc,
+    offset: bigInt(0),
+    limit: 1,
+    requestSize: 512 * 1024,
+  })
+  for await (const chunk of iter) chunks.push(Buffer.from(chunk))
+  const buf = Buffer.concat(chunks)
   if (!buf || buf.length === 0) throw new Error('Thumb rỗng')
   if (buf.length > 1024 * 1024) throw new Error('Thumb quá lớn, bỏ qua để tránh tải nhầm full video')
   const mime = buf[0] === 0x89 && buf[1] === 0x50 ? 'image/png' : 'image/jpeg'
@@ -334,7 +354,7 @@ async function getThumbBuffer(chatId, messageId) {
 
 const builder = new addonBuilder({
   id: 'com.myfilms.telegram',
-  version: '2.1.0',
+  version: '2.1.1',
   name: ADDON_NAME,
   resources: ['catalog', 'meta', 'stream'],
   types: ['movie'],
