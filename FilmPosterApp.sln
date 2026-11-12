@@ -1,0 +1,24 @@
+Microsoft Visual Studio Solution File, Format Version 12.00
+# Visual Studio Version 17
+VisualStudioVersion = 17.0.31903.59
+MinimumVisualStudioVersion = 10.0.40219.1
+Project("{8BC9CEB8-8B4A-11D0-8D11-00A0C91BC942}") = "FilmPosterApp", "FilmPosterApp.vcxproj", "{B3A400FC-0411-4FF4-897D-9649EC2E45DE}"
+EndProject
+Global
+	GlobalSection(SolutionConfigurationPlatforms) = preSolution
+		Debug|x64 = Debug|x64
+		Release|x64 = Release|x64
+	EndGlobalSection
+	GlobalSection(ProjectConfigurationPlatforms) = postSolution
+		{B3A400FC-0411-4FF4-897D-9649EC2E45DE}.Debug|x64.ActiveCfg = Debug|x64
+		{B3A400FC-0411-4FF4-897D-9649EC2E45DE}.Debug|x64.Build.0 = Debug|x64
+		{B3A400FC-0411-4FF4-897D-9649EC2E45DE}.Release|x64.ActiveCfg = Release|x64
+		{B3A400FC-0411-4FF4-897D-9649EC2E45DE}.Release|x64.Build.0 = Release|x64
+	EndGlobalSection
+	GlobalSection(SolutionProperties) = preSolution
+		HideSolutionNode = FALSE
+	EndGlobalSection
+	GlobalSection(ExtensibilityGlobals) = postSolution
+		SolutionGuid = {E7BBDFC7-8570-4A28-8527-3C452186EC91}
+	EndGlobalSection
+EndGlobal

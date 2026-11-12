@@ -1,0 +1,85 @@
+FILMPOSTERAPP C++ v1.0 — APP .EXE WIN32, MO LEN KHONG HIEN CMD
+================================================================
+Ban nay viet bang C++ thuan (Win32 + WinHTTP), 1 file FilmPosterApp.cpp,
+khong can Python, khong can pip, mo len chi co cua so app, KHONG co
+cua so cmd nao. Nut bam: Push Poster | Push Background | Push Ca Hai |
+Xem truoc, kem tick "Ghi de anh cu" va bang ket qua trong app.
+
+LUU Y QUAN TRONG
+----------------
+- Tao khong bien dich duoc file .exe tai day (may tao chay Linux, khong co
+  trinh bien dich Windows). Trong zip chi co source C++ + 2 file build de
+  may tu build ra .exe tren PC Windows. Cua so app hien tieu de
+  "FilmPosterApp C++ v1.0" — mo app len thay dung tieu de do la dung ban moi.
+- Neu build bao loi, gui nguyen DANH SACH LOI (ten file, so dong, ma loi)
+  cho tao, dung gui anh chup cat gon.
+
+BUOC 0 — CHUAN BI (neu may da lam o ban script thi bo qua)
+----------------------------------------------------------
+- credentials.json + token.json: copy 2 file nay tu thu muc tool cu sang
+  thu muc nay (cung cho voi FilmPosterApp.cpp). Chua co credentials.json
+  thi xem HUONG-DAN.txt o ban cu, buoc 1 (tao project Google Cloud, bat
+  Drive API + Sheets API, tao OAuth Desktop, tai credentials.json).
+  Nho them email vao Test users.
+- config.json trong zip da dien san spreadsheet_id DUNG (ket thuc bang
+  chu I hoa).
+
+BUOC 1 — BUILD RA .EXE (chon 1 trong 3 cach)
+---------------------------------------------
+Cach 1 — Visual Studio, mo .sln giong project LumTre (khuyen dung):
+  1. Bam dup chuot vao FilmPosterApp.sln (mo giong All-in-one.sln).
+  2. Tren thanh cong cu chon Release + x64.
+  3. Bam Build -> Build Solution (Ctrl+Shift+B), hoac F5 de chay luon.
+  4. File exe nam o: bin\Release\FilmPosterApp.exe. Sau khi build,
+     config.json, posters/, backgrounds/, credentials.json, token.json
+     da duoc copy san sang ben canh file exe (Post-Build Event), mo
+     len chay ngay, khong can copy tay.
+Cach 2 — MSVC bang dong lenh (build.bat):
+  1. Mo "x64 Native Tools Command Prompt for VS" (tim trong Start menu).
+  2. cd toi thu muc giai nen, go:  build.bat
+Cach 3 — MinGW-w64 (mien phi, khong can Visual Studio):
+  1. Cai MinGW-w64 (MSYS2: pacman -S mingw-w64-x86_64-gcc), them thu
+     muc bin vao PATH.
+  2. Mo cmd binh thuong, cd toi thu muc giai nen, go:  build_mingw.bat
+File exe build bang cach 2/3 nam NGAY TRONG THU MUC NAY, cung cho
+voi posters/, backgrounds/, config.json, credentials.json. De nguyen
+nhu vay, dung di chuyen file .exe di cho khac mot minh.
+
+BUOC 2 — DUNG APP
+------------------
+1. Bo anh vao thu muc:
+   - Poster: posters/phim X.jpg (vd phim 40.jpg) -> ghi cot E
+   - Background: backgrounds/phim X.jpg (hoac posters/phim X-bg.jpg) -> ghi cot G
+2. Bam dup chuot mo FilmPosterApp.exe (khong hien cmd).
+3. Bam nut muon dung. Lan dau no mo trinh duyet dang nhap Google + bam
+   Allow, cac lan sau khong hoi nua (token luu o token.json).
+4. Mo lai Stremio, doi vai phut (server cache 5 phut) la thay anh moi.
+
+NEU GAP LOI
+------------
+- Build bao 'cl' is not recognized: may mo cmd thuong, phai mo
+  "x64 Native Tools Command Prompt for VS" (Cach A), hoac dung Cach B.
+- Build bao khong tim thay winhttp.h / ws2tcpip.h: cai Windows SDK
+  (kem theo Visual Studio Installer -> Desktop development with C++).
+- Mo app bao thieu credentials.json: copy file credentials.json vao
+  cung thu muc voi file .exe.
+- App bao loi 403 access_denied: them email vao Test users trong
+  Google Cloud (APIs & Services -> OAuth consent screen -> Test users).
+- App bao loi 404: kiem tra spreadsheet_id trong app (o nhap tren cung)
+  co dung ID Sheet cua may khong, chu cuoi la I hoa.
+- Dang nhap Google xong ma app bao "Khong nhan duoc code": thu tat
+  trinh duyet roi bam Push lai; kiem tra firewall khong chan
+  localhost (127.0.0.1).
+
+FILE TRONG ZIP NAY
+------------------
+- FilmPosterApp.cpp: toan bo app (giao dien + OAuth + Drive + Sheets).
+- FilmPosterApp.sln + FilmPosterApp.vcxproj + FilmPosterApp.vcxproj.filters:
+  mo .sln bang Visual Studio giong project LumTre, chon Release x64,
+  Ctrl+Shift+B la co exe o bin\Release\ (config + anh + credentials
+  tu copy sang ben canh exe sau khi build).
+- build.bat: build bang MSVC (Visual Studio).
+- build_mingw.bat: build bang MinGW-w64.
+- config.json: spreadsheet_id da dien dung + ten thu muc.
+- posters/ + backgrounds/: thu muc bo anh (co README.txt huong dan dat ten).
+- HUONG-DAN-CPP.txt: file nay.
