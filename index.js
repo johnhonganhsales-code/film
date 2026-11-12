@@ -1,4 +1,4 @@
-// MyFilms addon v2.1.3 — STREAM NHANH HƠN (chunk 1MB, range 10MB, cache + prefetch)
+// MyFilms addon v2.1.4 — BACKGROUND SỬA (Drive uc cũng được dùng, như poster)
 // MyFilms addon v2.1.2 — GIỮ BÌA CŨ (sửa lỗi mất bìa của 2.1.0/2.1.1)
 //  Poster trong Sheet (Drive) dùng lại qua lh3 w300, tgthumb chỉ dự phòng
 //  khi Sheet trống. Phim tự quét + id phim-msg giữ nguyên từ 2.1.1.
@@ -230,6 +230,21 @@ function posterUrl(v) {
   return `https://via.placeholder.com/300x450?text=${encodeURIComponent(v.name)}`
 }
 
+// --- Background: giống poster, chỉ khác là ảnh nền rộng nên lấy w1280 ---
+// v2.1.3 sai ở đây: meta handler bỏ qua mọi link Drive uc?id=... ở cột
+// background (chỉ giữ lại link KHÔNG phải Drive), nên background luôn
+// rớt về poster. v2.1.4: Drive uc -> lh3 ...=w1280, link khác giữ nguyên,
+// trống mới rớt về poster.
+function backgroundUrl(v) {
+  const b = (v.background || '').trim()
+  if (b) {
+    const did = driveIdFromUrl(b)
+    if (did) return `https://lh3.googleusercontent.com/d/${did}=w1280`
+    return b
+  }
+  return posterUrl(v)
+}
+
 async function getVideos() {
   const now = Date.now()
   if (videosCache.length > 0 && now - lastFetch < CACHE_TTL) {
@@ -373,7 +388,7 @@ async function getThumbBuffer(chatId, messageId) {
 
 const builder = new addonBuilder({
   id: 'com.myfilms.telegram',
-  version: '2.1.3',
+  version: '2.1.4',
   name: ADDON_NAME,
   resources: ['catalog', 'meta', 'stream'],
   types: ['movie'],
@@ -402,7 +417,7 @@ builder.defineMetaHandler(async ({ id }) => {
       id, type: 'movie',
       name: v.name,
       poster: posterUrl(v),
-      background: (v.background && !v.background.includes('drive.google.com/uc')) ? v.background : posterUrl(v),
+      background: backgroundUrl(v),
       description: v.description || ''
     }
   }
